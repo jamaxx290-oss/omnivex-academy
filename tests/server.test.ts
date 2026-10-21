@@ -12,6 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import type { Server } from "node:http";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { io as ioClient, type Socket as ClientSocket } from "socket.io-client";
 
 /* Environment must be set before any server module is imported. */
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "ovx-test-"));
@@ -36,6 +37,7 @@ type Json = Record<string, unknown> | null;
 
 const { createApp } = await import("../src/server/app");
 const { bootstrapSettings, bootstrapAdmin } = await import("../src/server/bootstrap");
+const { initRealtime, getIO } = await import("../src/server/realtime");
 
 let server: Server;
 let base = "";
@@ -49,6 +51,10 @@ class Client {
 
   private header(): string {
     return [...this.cookies.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
+  }
+
+  cookieHeader(): string {
+    return this.header();
   }
 
   async req(
@@ -101,6 +107,7 @@ const memberEmail = "writer@omnivex.test";
 let memberName = "";
 let memberNameFromMe = "";
 let groupId = "";
+let callGroupId = "";
 let memberId = "";
 let conversationId = "";
 
@@ -120,9 +127,15 @@ beforeAll(async () => {
   });
   const addr = server.address();
   if (typeof addr === "object" && addr) base = `http://127.0.0.1:${addr.port}`;
+  initRealtime(server);
 });
 
 afterAll(async () => {
+  try {
+    getIO()?.close();
+  } catch {
+    /* best effort */
+  }
   await new Promise<void>((resolve) => server?.close(() => resolve()));
   try {
     fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -1000,5 +1013,319 @@ describe("group join policy", () => {
     expect(leave.status).toBe(200);
     const detail = await member.req(`/api/groups/${openGroupId}`);
     expect((detail.data as { isMember: boolean }).isMember).toBe(false);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Group calls                                                         */
+/* ------------------------------------------------------------------ */
+
+type CallSnap = {
+  id: string;
+  groupId: string;
+  startedBy: string;
+  startedByName: string | null;
+  participants: {
+    userId: string;
+    name: string;
+    selfMuted: boolean;
+    adminMuted: boolean;
+    handRaised: boolean;
+    publishing: boolean;
+  }[];
+};
+
+function connectSocket(c: Client): ClientSocket {
+  const s = ioClient(base, {
+    path: "/socket.io",
+    // Note: no withCredentials — in Node it drops extraHeaders on the WS upgrade.
+    extraHeaders: { Cookie: c.cookieHeader(), Origin: base },
+    transports: ["websocket"],
+  });
+  s.on("connect_error", (err: Error) => {
+    console.error("[test-socket] connect_error:", err.message);
+  });
+  return s;
+}
+
+function waitForEvent<T = Record<string, unknown>>(
+  s: ClientSocket,
+  event: string,
+  timeout = 4000,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const handler = (payload: T) => {
+      clearTimeout(timer);
+      resolve(payload);
+    };
+    const timer = setTimeout(() => {
+      s.off(event, handler);
+      reject(new Error(`timeout waiting for ${event}`));
+    }, timeout);
+    s.on(event, handler);
+  });
+}
+
+function joinCall(s: ClientSocket, groupId: string): Promise<{ ok?: boolean; call?: CallSnap; error?: string }> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("join timeout")), 4000);
+    s.emit("call:join", groupId, (r: { ok?: boolean; call?: CallSnap; error?: string }) => {
+      clearTimeout(timer);
+      resolve(r);
+    });
+  });
+}
+
+/** Polls the authoritative HTTP snapshot until the predicate holds. */
+async function waitCallState(
+  pred: (call: CallSnap) => boolean,
+  timeout = 4000,
+): Promise<CallSnap> {
+  const t0 = Date.now();
+  for (;;) {
+    const res = await member.req(`/api/groups/${callGroupId}/call`);
+    const call = (res.data as { call: CallSnap | null }).call;
+    if (call && pred(call)) return call;
+    if (Date.now() - t0 > timeout) {
+      throw new Error("timeout waiting for call state");
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
+describe("group calls", () => {
+  let memberSocket: ClientSocket;
+  let adminSocket: ClientSocket;
+  let callMemberId = "";
+  let outsiderGroupId = "";
+
+  beforeAll(async () => {
+    const meRes = await member.req("/api/me");
+    callMemberId = String((meRes.data as { user: { id: string } }).user.id);
+    // The main group was deleted by the moderation block — create a fresh one.
+    const created = await admin.req("/api/admin/groups", {
+      method: "POST",
+      body: { name: "Live Class Room", memberIds: [memberId] },
+    });
+    expect(created.status).toBe(201);
+    callGroupId = String((created.data as { id: string }).id);
+    // A group the member does not belong to.
+    const outsider = await admin.req("/api/admin/groups", {
+      method: "POST",
+      body: { name: "Outsider Room" },
+    });
+    expect(outsider.status).toBe(201);
+    outsiderGroupId = String((outsider.data as { id: string }).id);
+  });
+
+  afterAll(() => {
+    memberSocket?.close();
+    adminSocket?.close();
+  });
+
+  it("refuses to let a member start a call", async () => {
+    const res = await member.req(`/api/groups/${callGroupId}/call`, { method: "POST" });
+    expect(res.status).toBe(403);
+  });
+
+  it("lets the admin start a call and notifies the group members", async () => {
+    const res = await admin.req(`/api/groups/${callGroupId}/call`, { method: "POST" });
+    expect(res.status).toBe(201);
+    const call = (res.data as { call: CallSnap }).call;
+    expect(call.groupId).toBe(callGroupId);
+    expect(call.participants).toEqual([]);
+
+    const notes = await member.req("/api/notifications");
+    const items = (notes.data as { notifications: { title: string }[] }).notifications;
+    expect(items.some((n) => n.title.includes("Live class started"))).toBe(true);
+  });
+
+  it("returns the active call to members but not to non-members", async () => {
+    const asMember = await member.req(`/api/groups/${callGroupId}/call`);
+    expect(asMember.status).toBe(200);
+    expect((asMember.data as { call: CallSnap | null }).call?.groupId).toBe(callGroupId);
+
+    // A group the member does not belong to → cannot see its call.
+    const asNonMember = await member.req(`/api/groups/${outsiderGroupId}/call`);
+    expect(asNonMember.status).toBe(403);
+  });
+
+  it("does not start a second concurrent call in the same group", async () => {
+    const res = await admin.req(`/api/groups/${callGroupId}/call`, { method: "POST" });
+    expect(res.status).toBe(200);
+    expect((res.data as { alreadyActive: boolean }).alreadyActive).toBe(true);
+  });
+
+  it("admits group members to the call over socket", async () => {
+    memberSocket = connectSocket(member);
+    adminSocket = connectSocket(admin);
+    await Promise.all([
+      new Promise<void>((r) => memberSocket.on("connect", () => r())),
+      new Promise<void>((r) => adminSocket.on("connect", () => r())),
+    ]);
+
+    const adminJoin = await joinCall(adminSocket, callGroupId);
+    expect(adminJoin.ok).toBe(true);
+
+    const rosterEvent = waitForEvent(memberSocket, "call:peer:joined");
+    const join = await joinCall(memberSocket, callGroupId);
+    expect(join.ok).toBe(true);
+    expect(join.call?.participants.some((p) => p.userId === callMemberId)).toBe(true);
+    // everyone joins muted
+    expect(join.call?.participants.every((p) => p.selfMuted && !p.publishing)).toBe(true);
+    const peerJoined = await rosterEvent as { userId: string };
+    expect(peerJoined.userId).toBe(callMemberId);
+  });
+
+  it("lets a member unmute, then the host mutes them and blocks self-unmute", async () => {
+    // member turns mic on → becomes publishing
+    memberSocket.emit("call:mic", { groupId: callGroupId, on: true });
+    const afterUnmute = await waitCallState((c) =>
+      c.participants.some((p) => p.userId === callMemberId && p.publishing),
+    );
+    expect(
+      afterUnmute.participants.find((p) => p.userId === callMemberId)?.selfMuted,
+    ).toBe(false);
+
+    // admin force-mutes the member → member is told directly
+    const forced = waitForEvent<{ groupId: string; muted: boolean }>(
+      memberSocket,
+      "call:forced-mute",
+    );
+    adminSocket.emit("call:admin-mic", { groupId: callGroupId, userId: callMemberId, muted: true });
+    const mutePayload = await forced;
+    expect(mutePayload.muted).toBe(true);
+
+    const snap2 = await waitCallState((c) =>
+      c.participants.some(
+        (p) => p.userId === callMemberId && p.adminMuted && !p.publishing,
+      ),
+    );
+    expect(
+      snap2.participants.find((p) => p.userId === callMemberId)?.selfMuted,
+    ).toBe(true);
+
+    // the blocked member tries to unmute → server ignores it
+    memberSocket.emit("call:mic", { groupId: callGroupId, on: true });
+    await new Promise((r) => setTimeout(r, 300));
+    const stillBlocked = await member.req(`/api/groups/${callGroupId}/call`);
+    const meRow = (stillBlocked.data as { call: CallSnap }).call.participants.find(
+      (p) => p.userId === callMemberId,
+    );
+    expect(meRow?.adminMuted).toBe(true);
+    expect(meRow?.publishing).toBe(false);
+  });
+
+  it("lets the host lift the mute so the person can unmute themselves", async () => {
+    adminSocket.emit("call:admin-mic", { groupId: callGroupId, userId: callMemberId, muted: false });
+
+    // block lifted, but the person is still self-muted (never force-unmuted)
+    await waitCallState((c) =>
+      c.participants.some(
+        (p) =>
+          p.userId === callMemberId &&
+          !p.adminMuted &&
+          p.selfMuted &&
+          !p.publishing,
+      ),
+    );
+
+    memberSocket.emit("call:mic", { groupId: callGroupId, on: true });
+    const snap = await waitCallState((c) =>
+      c.participants.some((p) => p.userId === callMemberId && p.publishing),
+    );
+    expect(
+      snap.participants.find((p3) => p3.userId === callMemberId)?.publishing,
+    ).toBe(true);
+  });
+
+  it("broadcasts raised hands to everyone in the call", async () => {
+    const heard = waitForEvent<{ userId: string; name: string; raised: boolean }>(
+      adminSocket,
+      "call:hand",
+    );
+    memberSocket.emit("call:hand", { groupId: callGroupId, raised: true });
+    const hand = await heard;
+    expect(hand.userId).toBe(callMemberId);
+    expect(hand.raised).toBe(true);
+
+    const snap = await waitCallState((c) =>
+      c.participants.some((p) => p.userId === callMemberId && p.handRaised),
+    );
+    expect(
+      snap.participants.find((p) => p.userId === callMemberId)?.handRaised,
+    ).toBe(true);
+  });
+
+  it("removes a participant when they leave the call", async () => {
+    memberSocket.emit("call:leave", callGroupId);
+    const snap = await waitCallState((c) =>
+      !c.participants.some((p) => p.userId === callMemberId),
+    );
+    expect(snap.participants.some((p) => p.userId === callMemberId)).toBe(false);
+  });
+
+  it("ends the call for everyone when the admin ends it", async () => {
+    const ended = waitForEvent<{ groupId: string }>(adminSocket, "call:ended");
+    const res = await admin.req(`/api/groups/${callGroupId}/call/end`, { method: "POST" });
+    expect(res.status).toBe(200);
+    const payload = await ended;
+    expect(payload.groupId).toBe(callGroupId);
+
+    const after = await member.req(`/api/groups/${callGroupId}/call`);
+    expect((after.data as { call: CallSnap | null }).call).toBeNull();
+
+    // re-starting after an end works
+    const restart = await admin.req(`/api/groups/${callGroupId}/call`, { method: "POST" });
+    expect(restart.status).toBe(201);
+    const endAgain = await admin.req(`/api/groups/${callGroupId}/call/end`, { method: "POST" });
+    expect(endAgain.status).toBe(200);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* Admin message moderation                                            */
+/* ------------------------------------------------------------------ */
+
+describe("admin message moderation", () => {
+  let messageId = "";
+  let modGroupId = "";
+
+  beforeAll(async () => {
+    const created = await admin.req("/api/admin/groups", {
+      method: "POST",
+      body: { name: "Moderation Room", memberIds: [memberId] },
+    });
+    expect(created.status).toBe(201);
+    modGroupId = String((created.data as { id: string }).id);
+  });
+
+  it("a member cannot delete someone's message", async () => {
+    const sent = await admin.req(`/api/groups/${modGroupId}/messages`, {
+      method: "POST",
+      body: { type: "text", body: "Announcement about the live class" },
+    });
+    expect(sent.status).toBe(201);
+    messageId = String((sent.data as { message: { id: string } }).message.id);
+
+    const res = await member.req(`/api/messages/${messageId}`, { method: "DELETE" });
+    expect(res.status).toBe(403);
+  });
+
+  it("the admin can delete any message in any group", async () => {
+    const res = await admin.req(`/api/messages/${messageId}`, { method: "DELETE" });
+    expect(res.status).toBe(200);
+
+    const history = await member.req(`/api/groups/${modGroupId}/messages?limit=100`);
+    const msg = (history.data as {
+      messages: { id: string; body: string | null; deleted: boolean }[];
+    }).messages.find((m) => m.id === messageId);
+    expect(msg?.deleted).toBe(true);
+    expect(msg?.body).toBeNull();
+  });
+
+  it("404s for an unknown message", async () => {
+    const res = await admin.req("/api/messages/does-not-exist", { method: "DELETE" });
+    expect(res.status).toBe(404);
   });
 });

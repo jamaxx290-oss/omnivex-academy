@@ -199,6 +199,25 @@ export type NotificationPrefs = {
   announcement_push: boolean;
 };
 
+export type CallParticipant = {
+  userId: string;
+  name: string;
+  selfMuted: boolean;
+  /** The host muted them — they cannot unmute themselves until lifted. */
+  adminMuted: boolean;
+  handRaised: boolean;
+  publishing: boolean;
+};
+
+export type CallState = {
+  id: string;
+  groupId: string;
+  startedBy: string;
+  startedByName: string | null;
+  createdAt: string;
+  participants: CallParticipant[];
+};
+
 export type Announcement = {
   id: string;
   title: string;

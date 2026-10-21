@@ -362,6 +362,22 @@ export const emailDeliveries = sqliteTable(
   (t) => [uniqueIndex("email_deliveries_resend_idx").on(t.resend_email_id)],
 );
 
+export const calls = sqliteTable(
+  "calls",
+  {
+    id: text("id").primaryKey(),
+    group_id: text("group_id")
+      .notNull()
+      .references(() => groups.id, { onDelete: "cascade" }),
+    started_by: text("started_by")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    created_at: ts("created_at"),
+    ended_at: tsNull("ended_at"),
+  },
+  (t) => [index("calls_group_idx").on(t.group_id, t.ended_at)],
+);
+
 export const devOutbox = sqliteTable("dev_outbox", {
   id: text("id").primaryKey(),
   to_email: text("to_email").notNull(),

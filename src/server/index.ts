@@ -4,9 +4,11 @@ import { createApp } from "./app";
 import { bootstrapSettings, bootstrapAdmin } from "./bootstrap";
 import { initRealtime } from "./realtime";
 import { ensureVapidKeys } from "./notifications";
+import { closeStaleCalls } from "./calls";
 
 async function main(): Promise<void> {
   bootstrapSettings();
+  await closeStaleCalls();
   ensureVapidKeys();
   await bootstrapAdmin();
 

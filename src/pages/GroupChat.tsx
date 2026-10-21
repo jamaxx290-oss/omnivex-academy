@@ -2,9 +2,11 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, errorMessage } from "../lib/api";
-import type { GroupDetail } from "../lib/types";
+import type { CallState, GroupDetail } from "../lib/types";
 import ChatRoom from "../components/ChatRoom";
+import GroupCall from "../components/GroupCall";
 import { useMe } from "../hooks";
+import { useGroupCall } from "../hooks/useGroupCall";
 import { getSocket } from "../lib/socket";
 
 export default function GroupChatPage() {
@@ -21,6 +23,41 @@ export default function GroupChatPage() {
     queryFn: () => api<GroupDetail>(`/api/groups/${id}`),
     enabled: Boolean(id),
   });
+
+  const { data: callData, refetch: refetchCall } = useQuery({
+    queryKey: ["group-call", id],
+    queryFn: () => api<{ call: CallState | null }>(`/api/groups/${id}/call`),
+    enabled: Boolean(id) && Boolean(me?.user),
+  });
+  const activeCall = callData?.call ?? null;
+  const call = useGroupCall(id, me?.user?.id || "");
+  const [callBusy, setCallBusy] = useState(false);
+  const [callErr, setCallErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    const s = getSocket();
+    const refresh = () => void refetchCall();
+    s.on("call:started", refresh);
+    s.on("call:ended", refresh);
+    return () => {
+      s.off("call:started", refresh);
+      s.off("call:ended", refresh);
+    };
+  }, [refetchCall]);
+
+  async function startClass() {
+    setCallBusy(true);
+    setCallErr(null);
+    try {
+      await api(`/api/groups/${id}/call`, { method: "POST" });
+      await call.join();
+      await refetchCall();
+    } catch (err) {
+      setCallErr(errorMessage(err));
+    } finally {
+      setCallBusy(false);
+    }
+  }
 
   useEffect(() => {
     document.title = `${group?.name || "Group"} · Omnivex`;
@@ -100,26 +137,57 @@ export default function GroupChatPage() {
   }
 
   const header = (
-    <header className="flex items-center gap-3 border-b border-line bg-black/40 px-3 py-3 backdrop-blur-md sm:px-5">
-      <Link
-        to="/app/groups"
-        className="focus-ring flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-line text-mist transition hover:border-accent hover:text-white"
-        aria-label="Back to groups"
-      >
-        <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
-        </svg>
-      </Link>
-      <div className="min-w-0 flex-1">
-        <h1 className="truncate text-[15px] font-semibold leading-tight">{group.name}</h1>
-        <button
-          onClick={() => setShowMembers(true)}
-          className="focus-ring rounded text-xs text-mist transition hover:text-white"
+    <header className="border-b border-line bg-black/40 backdrop-blur-md">
+      <div className="flex items-center gap-3 px-3 py-3 sm:px-5">
+        <Link
+          to="/app/groups"
+          className="focus-ring flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-line text-mist transition hover:border-accent hover:text-white"
+          aria-label="Back to groups"
         >
-          {group.members.length} member{group.members.length === 1 ? "" : "s"}
-          {group.sendPolicy === "admins_only" ? " · announcements only" : ""}
-        </button>
+          <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5" />
+          </svg>
+        </Link>
+        <div className="min-w-0 flex-1">
+          <h1 className="truncate text-[15px] font-semibold leading-tight">{group.name}</h1>
+          <button
+            onClick={() => setShowMembers(true)}
+            className="focus-ring rounded text-xs text-mist transition hover:text-white"
+          >
+            {group.members.length} member{group.members.length === 1 ? "" : "s"}
+            {group.sendPolicy === "admins_only" ? " · announcements only" : ""}
+          </button>
+        </div>
+        {me?.user?.isAdmin && !activeCall && !call.joined && (
+          <button
+            onClick={() => void startClass()}
+            disabled={callBusy}
+            className="focus-ring shrink-0 rounded-xl border border-danger/60 bg-danger/10 px-3 py-1.5 text-xs font-semibold text-danger transition hover:bg-danger/20 disabled:opacity-50"
+          >
+            {callBusy ? "Starting…" : "Start class"}
+          </button>
+        )}
       </div>
+      {activeCall && !call.joined && (
+        <div className="flex items-center gap-3 border-t border-danger/30 bg-danger/10 px-3 py-2 sm:px-5">
+          <span className="relative flex h-2 w-2 shrink-0">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-danger opacity-60" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-danger" />
+          </span>
+          <p className="min-w-0 flex-1 truncate text-xs">
+            🔴 Live class in progress
+            {activeCall.startedByName ? ` — started by ${activeCall.startedByName}` : ""}
+            {callErr && <span className="text-danger"> · {callErr}</span>}
+          </p>
+          <button
+            onClick={() => void call.join()}
+            disabled={call.joining}
+            className="focus-ring shrink-0 rounded-lg bg-danger px-3 py-1 text-xs font-semibold text-white transition hover:bg-danger/80 disabled:opacity-50"
+          >
+            {call.joining ? "Joining…" : "Join"}
+          </button>
+        </div>
+      )}
     </header>
   );
 
@@ -132,11 +200,45 @@ export default function GroupChatPage() {
           myId={me?.user?.id || ""}
           header={header}
           canSend={group.canSend}
+          isAdmin={Boolean(me?.user?.isAdmin)}
           mutedNotice={
             group.canSend ? undefined : "Only admins can post in this group"
           }
         />
       </div>
+
+      {call.joined && me?.user && call.roster && (
+        <GroupCall
+          call={call.roster}
+          myId={me.user.id}
+          isAdmin={Boolean(me.user.isAdmin)}
+          selfMuted={call.selfMuted}
+          adminMuted={call.adminMuted}
+          handRaised={call.handRaised}
+          micBusy={call.micBusy}
+          error={call.error}
+          remoteStreams={call.remoteStreams}
+          lastHand={call.lastHand}
+          audioBlocked={call.audioBlocked}
+          onToggleMic={() => void call.toggleMic()}
+          onToggleHand={call.toggleHand}
+          onAdminSetMute={call.adminSetMute}
+          onLeave={() => {
+            call.leave();
+            void refetchCall();
+          }}
+          onEnd={() => {
+            void api(`/api/groups/${id}/call/end`, { method: "POST" })
+              .then(() => {
+                call.leave();
+                void refetchCall();
+              })
+              .catch((err) => setCallErr(errorMessage(err)));
+          }}
+          onBindAudio={call.bindAudioEl}
+          onEnableAudio={call.enableAudio}
+        />
+      )}
 
       {showMembers && (
         <div

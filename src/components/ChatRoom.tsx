@@ -18,6 +18,8 @@ type Props = {
   myId: string;
   canSend?: boolean;
   mutedNotice?: string;
+  /** Platform admins can delete any message in the room. */
+  isAdmin?: boolean;
 };
 
 const QUICK_EMOJI = [
@@ -61,6 +63,7 @@ export default function ChatRoom({
   myId,
   canSend = true,
   mutedNotice,
+  isAdmin = false,
 }: Props) {
   const base = scope === "group" ? `/api/groups/${roomId}` : `/api/dm/${roomId}`;
   const event = scope === "group" ? "group:message" : "dm:message";
@@ -94,6 +97,22 @@ export default function ChatRoom({
   const [params] = useSearchParams();
 
   /* ---------------- data ---------------- */
+
+  async function deleteMessage(id: string) {
+    if (!window.confirm("Delete this message for everyone?")) return;
+    try {
+      await api(`/api/messages/${id}`, { method: "DELETE" });
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === id
+            ? { ...m, deleted: true, body: null, mediaUrl: null }
+            : m,
+        ),
+      );
+    } catch (err) {
+      setNotice(errorMessage(err));
+    }
+  }
 
   const markRead = useCallback(() => {
     if (readTimerRef.current) return;
@@ -492,6 +511,8 @@ export default function ChatRoom({
                     grouped={Boolean(grouped)}
                     flash={flashId === m.id}
                     showSender={scope === "group" && !grouped}
+                    canDelete={isAdmin}
+                    onDelete={() => void deleteMessage(m.id)}
                     onReply={() => {
                       setReplyTo(m);
                       taRef.current?.focus();
@@ -726,6 +747,8 @@ function MessageBubble({
   grouped,
   flash,
   showSender,
+  canDelete,
+  onDelete,
   onReply,
   onJump,
 }: {
@@ -734,6 +757,8 @@ function MessageBubble({
   grouped: boolean;
   flash: boolean;
   showSender: boolean;
+  canDelete: boolean;
+  onDelete: () => void;
   onReply: () => void;
   onJump: (id: string) => void;
 }) {
@@ -866,6 +891,14 @@ function MessageBubble({
           >
             Reply
           </button>
+          {canDelete && !m.deleted && (
+            <button
+              onClick={onDelete}
+              className="focus-ring rounded px-1 text-[10px] font-medium text-danger transition hover:text-danger/70"
+            >
+              Delete
+            </button>
+          )}
           {!grouped && (
             <time
               className="px-1 text-[10px] text-mist md:hidden"

@@ -691,6 +691,44 @@ async function notifyGroupActivity(
 }
 
 /* ------------------------------------------------------------------ */
+/* Message deletion (admin can delete anyone's message in any group)   */
+/* ------------------------------------------------------------------ */
+
+router.delete(
+  "/messages/:id",
+  requireMember,
+  async (req: Request, res: Response) => {
+    const u = req.appUser as SessionUser;
+    const m = await db.query.messages.findFirst({
+      where: eq(messages.id, String(req.params.id)),
+    });
+    if (!m) return res.status(404).json({ error: "Message not found" });
+    if (m.deleted_at) return res.json({ ok: true, deleted: true });
+
+    // Platform admins can delete any message; no one else can delete at all.
+    if (!u.is_admin) {
+      return res
+        .status(403)
+        .json({ error: "Admin access required", code: "FORBIDDEN" });
+    }
+
+    await db
+      .update(messages)
+      .set({ deleted_at: new Date() })
+      .where(eq(messages.id, m.id));
+
+    const io = getIO();
+    if (m.scope === "group" && m.group_id) {
+      io?.to(`group:${m.group_id}`).emit("message:deleted", { id: m.id });
+    } else if (m.conversation_id) {
+      io?.to(`dm:${m.conversation_id}`).emit("message:deleted", { id: m.id });
+    }
+
+    res.json({ ok: true, deleted: true });
+  },
+);
+
+/* ------------------------------------------------------------------ */
 /* Read markers                                                        */
 /* ------------------------------------------------------------------ */
 

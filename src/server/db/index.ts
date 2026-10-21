@@ -277,6 +277,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS group_join_requests_uniq ON group_join_request
 CREATE INDEX IF NOT EXISTS group_join_requests_group_idx ON group_join_requests (group_id, status);
 `,
   },
+  {
+    id: "005_calls",
+    sql: `
+CREATE TABLE IF NOT EXISTS calls (
+  id TEXT PRIMARY KEY NOT NULL,
+  group_id TEXT NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+  started_by TEXT NOT NULL REFERENCES user(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  ended_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS calls_group_idx ON calls (group_id, ended_at);
+`,
+  },
 ];
 
 function runMigrations(): void {

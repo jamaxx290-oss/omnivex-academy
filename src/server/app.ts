@@ -11,6 +11,7 @@ import { attachUser } from "./middleware";
 import { sqlite } from "./db";
 import mediaRouter from "./routes/media";
 import groupsRouter from "./routes/groups";
+import callsRouter from "./routes/calls";
 import accountRouter from "./routes/account";
 import paymentsRouter, { paymentWebhookRaw } from "./routes/payments";
 import adminRouter from "./routes/admin";
@@ -149,6 +150,7 @@ export function createApp(): Express {
 
   app.use(mediaRouter); // registers POST /api/uploads and GET /media/*path
   app.use("/api", groupsRouter);
+  app.use("/api", callsRouter);
   app.use("/api", accountRouter);
   app.use("/api", paymentsRouter);
   app.use("/api/admin", adminRouter);
