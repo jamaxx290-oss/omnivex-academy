@@ -1,0 +1,175 @@
+@import "tailwindcss";
+
+@theme {
+  --color-ink: #000000;
+  --color-surface: #0b1020;
+  --color-surface-2: #111a3a;
+  --color-surface-3: #16204a;
+  --color-line: #1d2a56;
+  --color-accent: #280dff;
+  --color-accent-hover: #3f27ff;
+  --color-accent-soft: rgba(40, 13, 255, 0.16);
+  --color-accent-ring: rgba(40, 13, 255, 0.45);
+  --color-mist: #9aa6d4;
+  --color-success: #2fd07a;
+  --color-danger: #ff5470;
+  --color-warning: #ffb020;
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+    Roboto, Helvetica, Arial, sans-serif;
+
+  --animate-fade-up: fade-up 0.5s cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-fade-in: fade-in 0.35s ease both;
+  --animate-pop: pop 0.25s cubic-bezier(0.16, 1, 0.3, 1) both;
+  --animate-pulse-soft: pulse-soft 2s ease-in-out infinite;
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes pop {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes pulse-soft {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--color-ink);
+  color: #ffffff;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overscroll-behavior-y: none;
+}
+
+/* App surfaces sit on a deep-black canvas with dark-blue cards */
+.app-bg {
+  background:
+    radial-gradient(1100px 500px at 80% -10%, rgba(40, 13, 255, 0.22), transparent 60%),
+    radial-gradient(800px 420px at -10% 30%, rgba(40, 13, 255, 0.12), transparent 55%),
+    #000000;
+}
+
+.card {
+  background: linear-gradient(180deg, var(--color-surface) 0%, #090e1e 100%);
+  border: 1px solid var(--color-line);
+}
+
+.btn-primary {
+  background: var(--color-accent);
+  color: #fff;
+  transition: background 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+  box-shadow: 0 8px 26px -12px var(--color-accent-ring);
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+  transform: translateY(-1px);
+}
+.btn-primary:active:not(:disabled) {
+  transform: translateY(0);
+}
+.btn-primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-ghost {
+  border: 1px solid var(--color-line);
+  background: rgba(17, 26, 58, 0.55);
+  transition: background 0.18s ease, border-color 0.18s ease;
+}
+.btn-ghost:hover:not(:disabled) {
+  background: var(--color-surface-2);
+  border-color: var(--color-accent);
+}
+
+.input {
+  width: 100%;
+  background: rgba(6, 10, 24, 0.9);
+  border: 1px solid var(--color-line);
+  border-radius: 0.75rem;
+  padding: 0.7rem 0.9rem;
+  color: #fff;
+  font-size: 0.95rem;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.input::placeholder {
+  color: #5f6b9c;
+}
+.input:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-soft);
+}
+
+.focus-ring:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/* thin scrollbars for chat panes */
+.scroll-thin {
+  scrollbar-width: thin;
+  scrollbar-color: #243066 transparent;
+}
+.scroll-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.scroll-thin::-webkit-scrollbar-thumb {
+  background: #243066;
+  border-radius: 999px;
+}
+
+/* jump-flash for reply navigation */
+@keyframes jump-flash {
+  0% {
+    background-color: rgba(40, 13, 255, 0.35);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+.jump-flash {
+  animation: jump-flash 1.6s ease-out 1;
+  border-radius: 0.75rem;
+}
+
+.safe-bottom {
+  padding-bottom: max(env(safe-area-inset-bottom), 0.75rem);
+}
