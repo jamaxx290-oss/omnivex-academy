@@ -1,0 +1,29 @@
+# Omnivex Academy — single-container stack for a shared small VPS.
+# Normal use is through ./deploy.sh (build + up + health check).
+name: omnivex
+
+services:
+  omnivex:
+    build:
+      context: .
+    image: omnivex-academy:latest
+    container_name: omnivex
+    restart: unless-stopped
+    ports:
+      # Host port comes from PORT in .env; the container always listens on 3000.
+      - "${PORT:-3000}:3000"
+    env_file:
+      - .env
+    environment:
+      # environment{} overrides env_file, so the in-container port stays fixed.
+      NODE_ENV: production
+      PORT: "3000"
+      DATA_DIR: /app/data
+    volumes:
+      # SQLite database + uploads — persists across rebuilds/redeploys.
+      - omnivex-data:/app/data
+    # Leave headroom for Docker/systemd on a 1 GB box; swap stays host-managed.
+    mem_limit: 768m
+
+volumes:
+  omnivex-data:

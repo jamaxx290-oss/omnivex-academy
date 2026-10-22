@@ -1,0 +1,13 @@
+# Keep the build context small and never bake secrets/state into the image.
+node_modules
+dist
+data
+.git
+.env
+.env.*
+*.log
+*.tsbuildinfo
+coverage
+.DS_Store
+Dockerfile
+docker-compose.yml
