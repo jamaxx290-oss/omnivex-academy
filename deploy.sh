@@ -54,7 +54,7 @@ else
 fi
 
 # ---- 3. Build the frontend (bounded memory for 1 GB boxes) --
-echo "==> Building frontend (typecheck + icons + vite build)"
+echo "==> Building frontend (typecheck + vite build)"
 NODE_OPTIONS="--max-old-space-size=512" npm run build
 
 # ---- 4. Persistent data folder (SQLite + uploads) ----------

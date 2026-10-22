@@ -37,9 +37,30 @@ type WrapArgs = {
 };
 
 /**
+ * Absolute origin used to embed the brand logo image in emails. Read from
+ * APP_URL on the server only — this module is also imported by the browser
+ * bundle (the Admin broadcast composer preview), where `process` does not
+ * exist, so the email falls back to the typographic tile there.
+ */
+function emailAssetOrigin(): string {
+  try {
+    if (typeof process === "undefined") return "";
+    return (process.env?.APP_URL || "").replace(/\/+$/, "");
+  } catch {
+    return "";
+  }
+}
+
+/**
  * Renders the shared brand shell around a block of content HTML.
  */
 export function wrapEmail({ preheader, contentHtml }: WrapArgs): string {
+  const origin = emailAssetOrigin();
+  const logo = origin
+    ? `<img src="${origin}/logo.png" width="36" height="36" alt="${escapeHtml(
+        BRAND.name,
+      )}" style="display:block;width:36px;height:36px;border-radius:11px;object-fit:cover;" />`
+    : `<div style="width:36px;height:36px;border-radius:11px;background:${BRAND.ink};color:#ffffff;font-size:19px;font-weight:800;line-height:36px;text-align:center;">O</div>`;
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -69,7 +90,7 @@ export function wrapEmail({ preheader, contentHtml }: WrapArgs): string {
               <table role="presentation" cellpadding="0" cellspacing="0">
                 <tr>
                   <td width="40" valign="middle">
-                    <div style="width:36px;height:36px;border-radius:11px;background:${BRAND.ink};color:#ffffff;font-size:19px;font-weight:800;line-height:36px;text-align:center;">O</div>
+                    ${logo}
                   </td>
                   <td valign="middle" style="padding-left:12px;">
                     <span style="font-size:16px;font-weight:700;color:${BRAND.ink};letter-spacing:-0.2px;">${escapeHtml(BRAND.name)}</span>

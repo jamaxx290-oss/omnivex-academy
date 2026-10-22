@@ -30,9 +30,7 @@ export default function Layout() {
       {/* Desktop sidebar */}
       <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col border-r border-line bg-black/40 px-4 py-6 md:flex">
         <a href="/app/groups" className="mb-8 flex items-center gap-2 px-2">
-          <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-accent text-sm font-bold">
-            O
-          </span>
+        <img src="/logo.png" alt="" className="h-9 w-9 rounded-xl ring-1 ring-white/10" />
           <span className="text-[15px] font-semibold tracking-tight">
             Omnivex Academy
           </span>
@@ -106,9 +104,7 @@ export default function Layout() {
         {/* Mobile top bar */}
         <header className="sticky top-0 z-30 flex items-center justify-between border-b border-line bg-black/70 px-4 py-3 backdrop-blur-md md:hidden">
           <a href="/app/groups" className="flex items-center gap-2">
-            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent text-xs font-bold">
-              O
-            </span>
+            <img src="/logo.png" alt="" className="h-8 w-8 rounded-lg ring-1 ring-white/10" />
             <span className="text-sm font-semibold">Omnivex Academy</span>
           </a>
           <div className="flex items-center gap-2">

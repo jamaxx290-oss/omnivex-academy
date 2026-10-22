@@ -117,8 +117,8 @@ self.addEventListener("push", (event) => {
   event.waitUntil(
     self.registration.showNotification(data.title || "Omnivex Academy", {
       body: data.body || "",
-      icon: "/icons/icon-192.png",
-      badge: "/icons/icon-192.png",
+      icon: "/logo.png",
+      badge: "/logo.png",
       tag: data.tag,
       data: { link: data.link || "/app/notifications" },
     }),

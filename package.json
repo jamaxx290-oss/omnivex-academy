@@ -5,10 +5,9 @@
   "type": "module",
   "description": "Omnivex Academy - Amazon KDP mentorship & community platform (PWA)",
   "scripts": {
-    "icons": "node scripts/generate-icons.mjs",
     "dev": "vite",
     "typecheck": "tsc --noEmit",
-    "build": "npm run typecheck && npm run icons && vite build",
+    "build": "npm run typecheck && vite build",
     "start": "tsx src/server/index.ts",
     "test": "vitest run"
   },

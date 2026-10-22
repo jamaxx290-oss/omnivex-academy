@@ -1,34 +1,115 @@
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useMe, useSettings } from "../hooks";
 import { naira } from "../lib/api";
+import { CommunityMock, MentorshipMock } from "../components/LandingMocks";
 
-const features = [
+/** Wraps children in a fade-up reveal the first time they scroll into view. */
+function Reveal({
+  children,
+  className = "",
+  delay = 0,
+}: {
+  children: ReactNode;
+  className?: string;
+  delay?: number;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [shown, setShown] = useState(false);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ) {
+      setShown(true);
+      return;
+    }
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setShown(true);
+          io.disconnect();
+        }
+      },
+      { rootMargin: "0px 0px -60px 0px", threshold: 0.08 },
+    );
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+
+  return (
+    <div
+      ref={ref}
+      className={`${shown ? "animate-fade-up" : "opacity-0"} ${className}`}
+      style={{ animationDelay: `${delay}ms` }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function Eyebrow({ children }: { children: ReactNode }) {
+  return (
+    <p className="text-xs font-semibold uppercase tracking-[0.22em] text-[#a78bfa]">
+      {children}
+    </p>
+  );
+}
+
+const paths = [
   {
-    icon: "M17 20h5v-2a4 4 0 0 0-3-3.87M9 20H4v-2a4 4 0 0 1 3-3.87m6-3.13a4 4 0 1 0-4-4 4 4 0 0 0 4 4Z",
-    title: "Live mentorship groups",
-    body: "Structured rooms where mentors and peers review covers, blurbs, and launch plans in real time.",
+    icon: "M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25",
+    title: "New to KDP? Start Here.",
+    body: "You don’t need previous publishing experience. Learn the fundamentals, understand the business, and develop the knowledge to approach your first publishing projects with confidence.",
   },
   {
-    icon: "M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 0 1-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8Z",
-    title: "Direct messages",
-    body: "Private one-to-one chats with accountability partners — voice notes, images, and video included.",
+    icon: "M2.25 18 9 11.25l4.306 4.307a11.95 11.95 0 0 1 5.814-5.519l2.74-1.22m0 0-5.94-2.281m5.94 2.28-2.28 5.941",
+    title: "Already Publishing? Go Further.",
+    body: "Refine your strategies, explore better opportunities, strengthen your organic ranking and sales, and learn how to grow your catalogue and royalties.",
+  },
+];
+
+const benefits = [
+  {
+    title: "Mentorship That Moves You Forward",
+    body: "Bring questions, publishing ideas, and challenges into mentorship rooms where you can seek constructive feedback.",
+    mock: <MentorshipMock />,
   },
   {
-    icon: "M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0 1 12 2.944a11.955 11.955 0 0 1-8.618 3.04A12.02 12.02 0 0 0 3 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016Z",
-    title: "KDP-focused curriculum",
-    body: "Keyword research, AMS ads, series strategy, and royalty math taught by authors who ship.",
-  },
-  {
-    icon: "M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 9v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z",
-    title: "One transparent price",
-    body: "Pay once in naira through Paystack and get full access. No upsells, no surprise tiers.",
+    title: "A Community Built Around Growth",
+    body: "Connect with fellow publishers, participate in discussions, follow important announcements, and build accountability into your journey.",
+    mock: <CommunityMock />,
   },
 ];
 
 const steps = [
-  { n: "01", t: "Create your account", b: "Sign up with your email and verify the 6-digit code we send you." },
-  { n: "02", t: "Activate membership", b: "Review the academy terms and check out securely in naira with Paystack." },
-  { n: "03", t: "Join the rooms", b: "Hop into mentorship groups, follow announcements, and start shipping books." },
+  {
+    n: "01",
+    t: "Create your account",
+    b: "Register and verify your email.",
+  },
+  {
+    n: "02",
+    t: "Activate your membership",
+    b: "Review the terms and pay securely through Paystack.",
+  },
+  {
+    n: "03",
+    t: "Enter the academy",
+    b: "Access the available learning resources, mentorship rooms, and community features.",
+  },
+];
+
+const included = [
+  "Hands-on KDP guidance — keywords, covers, ranking, launches, royalties",
+  "Live mentorship rooms with feedback from mentors",
+  "Private messages with voice notes, images, and video",
+  "Official announcements with instant notifications",
+  "A community of publishers building in public, together",
+  "One payment, ongoing access — no tiers, no upsells",
 ];
 
 export default function Landing() {
@@ -36,198 +117,395 @@ export default function Landing() {
   const { data: settings } = useSettings();
   const user = me?.user;
 
+  const isMember =
+    !!user && (user.membershipStatus === "active" || user.isAdmin);
+
   const cta =
     user && user.emailVerified
-      ? user.membershipStatus === "active" || user.isAdmin
+      ? isMember
         ? { to: "/app/groups", label: "Open the academy" }
         : { to: "/paywall", label: "Activate membership" }
-      : { to: "/auth", label: "Create your account" };
+      : { to: "/auth", label: "Join Omnivex Academy" };
+
+  const signInTo =
+    user && user.emailVerified ? (isMember ? "/app/groups" : "/paywall") : "/auth?mode=signin";
 
   return (
-    <div className="app-bg min-h-screen">
+    <div className="min-h-screen bg-ink">
       {/* Nav */}
-      <header className="mx-auto flex max-w-6xl items-center justify-between px-5 py-5">
-        <div className="flex items-center gap-2">
-          <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-accent text-sm font-bold">
-            O
-          </span>
-          <span className="text-[15px] font-semibold tracking-tight">
-            Omnivex Academy
-          </span>
-        </div>
-        <nav className="flex items-center gap-3 text-sm">
-          <a href="#how" className="hidden text-mist transition hover:text-white sm:block">
-            How it works
-          </a>
-          <a href="#features" className="hidden text-mist transition hover:text-white sm:block">
-            Features
-          </a>
-          <Link
-            to={user ? cta.to : "/auth"}
-            className="btn-primary focus-ring rounded-xl px-4 py-2 font-medium"
-          >
-            {user ? "Open app" : "Sign in"}
+      <header className="sticky top-0 z-50 border-b border-line/50 bg-ink/80 backdrop-blur-md">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-5 py-3.5">
+          <Link to="/" className="flex items-center gap-2.5">
+            <img
+              src="/logo.png"
+              alt=""
+              className="h-9 w-9 rounded-xl ring-1 ring-white/10"
+            />
+            <span className="text-[15px] font-semibold tracking-tight">
+              Omnivex Academy
+            </span>
           </Link>
-        </nav>
+          <nav className="hidden items-center gap-7 text-sm md:flex">
+            <a href="#gain" className="text-mist transition hover:text-white">
+              Inside the academy
+            </a>
+            <a href="#how" className="text-mist transition hover:text-white">
+              How it works
+            </a>
+            <a href="#pricing" className="text-mist transition hover:text-white">
+              Membership
+            </a>
+          </nav>
+          <div className="flex items-center gap-3">
+            {!user && (
+              <Link
+                to="/auth?mode=signin"
+                className="hidden text-sm text-mist transition hover:text-white sm:block"
+              >
+                Sign in
+              </Link>
+            )}
+            <Link
+              to={cta.to}
+              className="btn-primary focus-ring rounded-xl px-4 py-2 text-sm font-medium"
+            >
+              {user ? "Open app" : "Join"}
+            </Link>
+          </div>
+        </div>
       </header>
 
-      {/* Hero */}
-      <section className="mx-auto max-w-6xl px-5 pb-16 pt-10 text-center sm:pt-16">
-        <span className="animate-fade-up inline-flex items-center gap-2 rounded-full border border-line bg-surface/70 px-3 py-1 text-xs text-mist">
-          <span className="h-1.5 w-1.5 rounded-full bg-success" />
-          The KDP mentorship community
-        </span>
-        <h1 className="animate-fade-up mx-auto mt-5 max-w-3xl text-4xl font-bold leading-[1.05] tracking-tight sm:text-6xl">
-          Publish smarter.
-          <br />
-          <span className="bg-gradient-to-r from-white via-white to-accent bg-clip-text text-transparent">
-            Grow royalties together.
-          </span>
-        </h1>
-        <p className="animate-fade-up mx-auto mt-5 max-w-xl text-[15px] leading-relaxed text-mist sm:text-base">
-          Omnivex Academy is a private community for Amazon KDP authors —
-          live mentorship rooms, direct mentor access, and a proven playbook
-          for covers, keywords, ads, and launches.
-        </p>
-        <div className="animate-fade-up mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
-          <Link
-            to={cta.to}
-            className="btn-primary focus-ring w-full rounded-xl px-7 py-3.5 text-sm font-semibold sm:w-auto"
-          >
-            {cta.label}
-          </Link>
-          <Link
-            to="/auth"
-            className="btn-ghost focus-ring w-full rounded-xl px-7 py-3.5 text-sm font-semibold sm:w-auto"
-          >
-            I already have an account
-          </Link>
-        </div>
-
-        {settings?.priceKobo ? (
-          <p className="mt-4 text-xs text-mist">
-            Full membership ·{" "}
-            <span className="font-semibold text-white">
-              {naira(settings.priceKobo)}
-            </span>{" "}
-            one-time · paid in naira
-          </p>
-        ) : null}
-
-        {/* Hero mock */}
-        <div className="relative mx-auto mt-12 max-w-4xl">
-          <div className="card overflow-hidden rounded-2xl p-3 text-left sm:p-4">
-            <div className="flex items-center gap-1.5 border-b border-line px-2 pb-3">
-              <span className="h-2.5 w-2.5 rounded-full bg-danger/70" />
-              <span className="h-2.5 w-2.5 rounded-full bg-warning/70" />
-              <span className="h-2.5 w-2.5 rounded-full bg-success/70" />
-              <span className="ml-3 truncate text-[11px] text-mist">
-                omnivex.academy / launch-lab
+      {/* ---------------------------------------------------------- 1. Hero */}
+      <section className="relative overflow-hidden">
+        <div
+          className="pointer-events-none absolute inset-0"
+          style={{
+            background:
+              "radial-gradient(900px 420px at 50% -120px, rgba(139,92,246,0.22), transparent 65%), radial-gradient(700px 380px at 85% 10%, rgba(40,13,255,0.16), transparent 60%)",
+          }}
+        />
+        <div className="relative mx-auto max-w-6xl px-5 pb-16 pt-14 text-center sm:pt-20">
+          <Reveal>
+            <span className="inline-flex items-center gap-2 rounded-full border border-[#8b5cf6]/40 bg-[#8b5cf6]/10 px-4 py-1.5 text-[11px] font-semibold uppercase tracking-[0.18em] text-[#c4b5fd]">
+              The Amazon KDP Mentorship Community
+            </span>
+          </Reveal>
+          <Reveal delay={80}>
+            <h1 className="mx-auto mt-7 max-w-3xl text-[2.5rem] font-bold leading-[1.04] tracking-tight sm:text-6xl">
+              Start Your KDP Journey.
+              <br />
+              <span className="bg-gradient-to-r from-[#8b5cf6] via-[#a78bfa] to-[#c4b5fd] bg-clip-text text-transparent">
+                Build Beyond Your Limits.
               </span>
+            </h1>
+          </Reveal>
+          <Reveal delay={160}>
+            <p className="mx-auto mt-6 max-w-2xl text-[15px] leading-relaxed text-mist sm:text-base">
+              Whether you’re publishing your first book or looking to take your
+              existing catalogue to the next level, Omnivex gives you the
+              knowledge, mentorship, and community to grow with purpose.
+            </p>
+          </Reveal>
+          <Reveal delay={240}>
+            <div className="mt-9 flex flex-col items-center justify-center gap-3 sm:flex-row">
+              <Link
+                to={cta.to}
+                className="btn-primary focus-ring w-full rounded-xl px-8 py-3.5 text-sm font-semibold sm:w-auto"
+              >
+                {cta.label}
+              </Link>
+              <Link
+                to={signInTo}
+                className="btn-ghost focus-ring w-full rounded-xl px-8 py-3.5 text-sm font-semibold sm:w-auto"
+              >
+                Already a Member? Sign In
+              </Link>
             </div>
-            <div className="space-y-2 p-2">
-              <div className="rounded-xl bg-surface/80 p-3">
-                <p className="text-xs font-semibold text-white">Live mentorship rooms</p>
-                <p className="mt-0.5 truncate text-xs text-mist">
-                  Post a cover, blurb, or launch plan and get structured feedback from mentors and peers.
-                </p>
-              </div>
-              <div className="rounded-xl bg-surface/80 p-3">
-                <p className="text-xs font-semibold text-white">Voice notes, images &amp; video</p>
-                <p className="mt-0.5 truncate text-xs text-mist">
-                  Share a voice-note walkthrough or a screenshot — every format works in every chat.
-                </p>
-              </div>
-              <div className="rounded-xl bg-surface/80 p-3">
-                <p className="text-xs font-semibold text-white">Announcements &amp; DMs</p>
-                <p className="mt-0.5 truncate text-xs text-mist">
-                  Follow official updates and message accountability partners one-to-one.
-                </p>
-              </div>
-            </div>
+          </Reveal>
+        </div>
+      </section>
+
+      {/* -------------------------------------------------- 2. Two paths */}
+      <section id="paths" className="relative">
+        <div className="mx-auto max-w-6xl px-5 py-16 sm:py-24">
+          <Reveal className="text-center">
+            <Eyebrow>For every stage</Eyebrow>
+            <h2 className="mx-auto mt-3 max-w-2xl text-3xl font-bold tracking-tight sm:text-4xl">
+              Two paths. One academy.
+            </h2>
+            <p className="mx-auto mt-4 max-w-xl text-[15px] leading-relaxed text-mist">
+              You don’t need experience to begin — and you don’t need to be a
+              beginner to belong.
+            </p>
+          </Reveal>
+          <div className="mt-10 grid gap-5 md:grid-cols-2">
+            {paths.map((p, i) => (
+              <Reveal key={p.title} delay={i * 100}>
+                <div className="card group h-full rounded-2xl p-7 transition duration-300 hover:border-[#8b5cf6]/60 sm:p-8">
+                  <span className="flex h-12 w-12 items-center justify-center rounded-xl bg-[#8b5cf6]/12 text-[#a78bfa] ring-1 ring-[#8b5cf6]/30 transition group-hover:bg-[#8b5cf6]/20">
+                    <svg
+                      className="h-5 w-5"
+                      fill="none"
+                      viewBox="0 0 24 24"
+                      stroke="currentColor"
+                      strokeWidth={1.7}
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        d={p.icon}
+                      />
+                    </svg>
+                  </span>
+                  <h3 className="mt-5 text-xl font-bold tracking-tight">
+                    {p.title}
+                  </h3>
+                  <p className="mt-3 text-sm leading-relaxed text-mist sm:text-[15px]">
+                    {p.body}
+                  </p>
+                </div>
+              </Reveal>
+            ))}
           </div>
         </div>
       </section>
 
-      {/* Features */}
-      <section id="features" className="mx-auto max-w-6xl px-5 py-14">
-        <h2 className="text-center text-2xl font-bold tracking-tight sm:text-3xl">
-          Everything a KDP author needs, in one calm place
-        </h2>
-        <div className="mt-10 grid gap-4 sm:grid-cols-2">
-          {features.map((f) => (
+      {/* ------------------------------------------- 3. What you'll gain */}
+      <section id="gain" className="relative overflow-hidden">
+        <div
+          className="pointer-events-none absolute inset-0"
+          style={{
+            background:
+              "radial-gradient(800px 400px at 0% 30%, rgba(139,92,246,0.10), transparent 60%)",
+          }}
+        />
+        <div className="relative mx-auto max-w-6xl px-5 py-16 sm:py-24">
+          <Reveal className="text-center">
+            <Eyebrow>Inside the academy</Eyebrow>
+            <h2 className="mx-auto mt-3 max-w-2xl text-3xl font-bold tracking-tight sm:text-4xl">
+              What you’ll gain inside Omnivex
+            </h2>
+          </Reveal>
+
+          <div className="mt-12 space-y-16 sm:mt-16 sm:space-y-24">
+            {benefits.map((b, i) => (
+              <Reveal key={b.title}>
+                <div className="grid items-center gap-8 lg:gap-14 lg:grid-cols-2">
+                  <div className={i % 2 === 1 ? "lg:order-2" : ""}>
+                    <span className="text-xs font-semibold uppercase tracking-[0.22em] text-[#a78bfa]">
+                      0{i + 1}
+                    </span>
+                    <h3 className="mt-3 text-2xl font-bold tracking-tight sm:text-[1.75rem]">
+                      {b.title}
+                    </h3>
+                    <p className="mt-4 max-w-md text-[15px] leading-relaxed text-mist">
+                      {b.body}
+                    </p>
+                  </div>
+                  <div className={i % 2 === 1 ? "lg:order-1" : ""}>
+                    {b.mock}
+                  </div>
+                </div>
+              </Reveal>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ------------------------------------------- 4. Getting started */}
+      <section id="how" className="relative">
+        <div className="mx-auto max-w-6xl px-5 py-16 sm:py-20">
+          <Reveal className="text-center">
+            <Eyebrow>Getting started</Eyebrow>
+            <h2 className="mx-auto mt-3 max-w-2xl text-3xl font-bold tracking-tight sm:text-4xl">
+              Your Next Chapter Starts in Three Steps.
+            </h2>
+          </Reveal>
+          <div className="relative mt-10 grid gap-4 md:grid-cols-3 md:gap-5">
+            {/* connective line between the step numerals (desktop) */}
             <div
-              key={f.title}
-              className="card group rounded-2xl p-6 transition hover:border-accent"
-            >
-              <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-accent-soft text-white transition group-hover:bg-accent">
-                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.7}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d={f.icon} />
-                </svg>
+              className="pointer-events-none absolute left-[16.5%] right-[16.5%] top-7 hidden h-px md:block"
+              style={{
+                background:
+                  "linear-gradient(90deg, transparent, rgba(139,92,246,0.55), rgba(139,92,246,0.55), transparent)",
+              }}
+            />
+            {steps.map((s, i) => (
+              <Reveal key={s.n} delay={i * 90}>
+                <div className="card h-full rounded-2xl p-6 text-center transition duration-300 hover:border-[#8b5cf6]/50">
+                  <span className="relative mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-b from-[#8b5cf6]/25 to-[#8b5cf6]/5 text-xl font-black text-[#c4b5fd] ring-1 ring-[#8b5cf6]/40">
+                    {s.n}
+                  </span>
+                  <h3 className="mt-4 text-base font-semibold">{s.t}</h3>
+                  <p className="mt-2 text-sm leading-relaxed text-mist">{s.b}</p>
+                </div>
+              </Reveal>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* ---------------------------------------------- 5. Membership */}
+      <section id="pricing" className="relative">
+        <div className="mx-auto max-w-6xl px-5 py-16 sm:py-24">
+          <Reveal className="text-center">
+            <Eyebrow>Membership</Eyebrow>
+            <h2 className="mx-auto mt-3 max-w-2xl text-3xl font-bold tracking-tight sm:text-4xl">
+              One Membership. A World of Publishing Knowledge.
+            </h2>
+          </Reveal>
+          <Reveal delay={100} className="mt-10">
+            <div className="card relative mx-auto max-w-2xl overflow-hidden rounded-3xl">
+              <div
+                className="pointer-events-none absolute inset-x-0 top-0 h-40"
+                style={{
+                  background:
+                    "radial-gradient(500px 160px at 50% 0%, rgba(139,92,246,0.20), transparent 70%)",
+                }}
+              />
+              <div className="relative p-7 text-center sm:p-10">
+                {settings?.priceKobo ? (
+                  <>
+                    <p className="text-sm font-medium text-mist">
+                      Full academy membership
+                    </p>
+                    <p className="mt-3 text-5xl font-black tracking-tight text-white">
+                      {naira(settings.priceKobo)}
+                    </p>
+                    <p className="mt-2 text-sm text-mist">
+                      One-time payment · ongoing access · paid in naira
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-sm font-medium text-mist">
+                      Full academy membership
+                    </p>
+                    <p className="mt-3 text-2xl font-black tracking-tight text-white">
+                      One membership, full access
+                    </p>
+                    <p className="mt-2 text-sm text-mist">
+                      The current price is shown before you pay — no hidden
+                      fees.
+                    </p>
+                  </>
+                )}
+
+                <ul className="mx-auto mt-8 max-w-md space-y-3 text-left">
+                  {included.map((item) => (
+                    <li key={item} className="flex items-start gap-3 text-sm">
+                      <svg
+                        className="mt-0.5 h-4 w-4 shrink-0 text-[#a78bfa]"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth={2.4}
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      >
+                        <path d="m20 6-11 11-5-5" />
+                      </svg>
+                      <span className="leading-relaxed text-white/90">
+                        {item}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+
+                <Link
+                  to={cta.to}
+                  className="btn-primary focus-ring mt-9 inline-block w-full rounded-xl px-8 py-3.5 text-sm font-semibold sm:w-auto"
+                >
+                  {isMember ? "Open the academy" : "Join Omnivex Academy"}
+                </Link>
+
+                <p className="mx-auto mt-5 max-w-md text-xs leading-relaxed text-mist/80">
+                  Payment is processed securely by Paystack. You’ll review and
+                  accept the academy’s current terms
+                  {settings?.termsVersion ? ` (v${settings.termsVersion})` : ""} before paying.
+                </p>
+              </div>
+            </div>
+          </Reveal>
+        </div>
+      </section>
+
+      {/* ------------------------------------------- 6. Final CTA + footer */}
+      <section className="relative overflow-hidden border-t border-line/40">
+        <div
+          className="pointer-events-none absolute inset-0"
+          style={{
+            background:
+              "radial-gradient(700px 320px at 50% 115%, rgba(139,92,246,0.30), transparent 65%), radial-gradient(500px 220px at 50% 130%, rgba(40,13,255,0.22), transparent 60%)",
+          }}
+        />
+        <div className="relative mx-auto max-w-4xl px-5 py-20 text-center sm:py-28">
+          <Reveal>
+            <h2 className="text-3xl font-bold leading-tight tracking-tight sm:text-[2.75rem]">
+              Your KDP Journey Can Start Here.
+              <br />
+              <span className="bg-gradient-to-r from-[#8b5cf6] via-[#a78bfa] to-[#c4b5fd] bg-clip-text text-transparent">
+                Your Growth Doesn’t Have to Stop There.
               </span>
-              <h3 className="mt-4 text-base font-semibold">{f.title}</h3>
-              <p className="mt-2 text-sm leading-relaxed text-mist">{f.body}</p>
-            </div>
-          ))}
+            </h2>
+          </Reveal>
+          <Reveal delay={100}>
+            <p className="mx-auto mt-5 max-w-xl text-[15px] leading-relaxed text-mist">
+              Whether you’re taking your first step or building on years of
+              experience, Omnivex is here to help you learn, improve, and move
+              forward.
+            </p>
+          </Reveal>
+          <Reveal delay={180}>
+            <Link
+              to={cta.to}
+              className="btn-primary focus-ring mt-9 inline-block rounded-xl px-9 py-4 text-sm font-semibold"
+            >
+              {isMember ? "Open the academy" : "Enter Omnivex Academy"} →
+            </Link>
+          </Reveal>
         </div>
       </section>
 
-      {/* How it works */}
-      <section id="how" className="mx-auto max-w-6xl px-5 py-14">
-        <h2 className="text-center text-2xl font-bold tracking-tight sm:text-3xl">
-          From signup to your first live room in minutes
-        </h2>
-        <div className="mt-10 grid gap-4 sm:grid-cols-3">
-          {steps.map((s) => (
-            <div key={s.n} className="card relative rounded-2xl p-6">
-              <span className="text-3xl font-black text-accent/60">{s.n}</span>
-              <h3 className="mt-3 text-base font-semibold">{s.t}</h3>
-              <p className="mt-2 text-sm leading-relaxed text-mist">{s.b}</p>
+      <footer className="border-t border-line/50 bg-ink">
+        <div className="mx-auto flex max-w-6xl flex-col items-center gap-5 px-5 py-10 text-sm sm:flex-row sm:justify-between">
+          <div className="flex items-center gap-2.5">
+            <img
+              src="/logo.png"
+              alt=""
+              className="h-8 w-8 rounded-lg ring-1 ring-white/10"
+            />
+            <div className="text-left">
+              <p className="text-sm font-semibold">Omnivex Academy</p>
+              <p className="text-xs text-mist">
+                The Amazon KDP mentorship community.
+              </p>
             </div>
-          ))}
-        </div>
-      </section>
-
-      {/* Testimonial */}
-      <section className="mx-auto max-w-3xl px-5 py-14 text-center">
-        <blockquote className="text-lg leading-relaxed text-white/90 sm:text-xl">
-          Built for authors who want an accountable team — structured rooms,
-          direct mentor access, and a proven playbook for covers, keywords,
-          ads, and launches.
-        </blockquote>
-        <p className="mt-4 text-sm text-mist">
-          Everything you need to publish smarter, in one calm place.
-        </p>
-      </section>
-
-      {/* CTA */}
-      <section className="mx-auto max-w-6xl px-5 pb-20 pt-6">
-        <div className="card relative overflow-hidden rounded-3xl p-8 text-center sm:p-12">
-          <div
-            className="pointer-events-none absolute inset-0"
-            style={{
-              background:
-                "radial-gradient(500px 200px at 50% 0%, rgba(40,13,255,0.35), transparent 70%)",
-            }}
-          />
-          <h2 className="relative text-2xl font-bold tracking-tight sm:text-3xl">
-            Ready to publish with a team behind you?
-          </h2>
-          <p className="relative mx-auto mt-3 max-w-md text-sm text-mist">
-            Create your account, verify your email, and activate membership —
-            it takes under five minutes.
+          </div>
+          <nav className="flex flex-wrap items-center justify-center gap-x-6 gap-y-2 text-xs text-mist">
+            <a href="#gain" className="transition hover:text-white">
+              Inside the academy
+            </a>
+            <a href="#how" className="transition hover:text-white">
+              How it works
+            </a>
+            <a href="#pricing" className="transition hover:text-white">
+              Membership
+            </a>
+            <Link to="/auth?mode=signin" className="transition hover:text-white">
+              Sign in
+            </Link>
+            <a
+              href="mailto:hello@omnivex.manuskripta.xyz"
+              className="transition hover:text-white"
+            >
+              Support
+            </a>
+          </nav>
+          <p className="text-xs text-mist/70">
+            © {new Date().getFullYear()} Omnivex Academy. All rights reserved.
           </p>
-          <Link
-            to={cta.to}
-            className="btn-primary focus-ring relative mt-7 inline-block rounded-xl px-8 py-3.5 text-sm font-semibold"
-          >
-            {cta.label}
-          </Link>
         </div>
-      </section>
-
-      <footer className="border-t border-line px-5 py-8 text-center text-xs text-mist">
-        © {new Date().getFullYear()} Omnivex Academy · Built for authors who ship.
       </footer>
     </div>
   );
