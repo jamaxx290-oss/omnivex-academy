@@ -8,7 +8,7 @@ function uuid(): string {
   return crypto.randomUUID();
 }
 
-/** Canonical sender: "Omnivex Academy <hello@omnivex.manuskripta.xyz>". */
+/** Canonical sender: "Omnivex Academy <hello@omnivex-academy.xyz>". */
 export function fromAddress(): string {
   return `${env.resendSenderName} <${env.resendSenderEmail}>`;
 }

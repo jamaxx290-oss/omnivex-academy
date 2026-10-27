@@ -52,7 +52,7 @@ export const env = {
   resendApiKey: process.env.RESEND_API_KEY || "",
   resendSenderName: process.env.RESEND_FROM_NAME || "Omnivex Academy",
   resendSenderEmail:
-    process.env.RESEND_FROM_EMAIL || "hello@omnivex.manuskripta.xyz",
+    process.env.RESEND_FROM_EMAIL || "hello@omnivex-academy.xyz",
   resendWebhookSecret: process.env.RESEND_WEBHOOK_SECRET || "",
 
   paystackSecretKey: process.env.PAYSTACK_SECRET_KEY || "",
@@ -63,7 +63,7 @@ export const env = {
 
   vapidPublicKey: process.env.VAPID_PUBLIC_KEY || "",
   vapidPrivateKey: process.env.VAPID_PRIVATE_KEY || "",
-  vapidSubject: process.env.VAPID_SUBJECT || "mailto:admin@omnivex.academy",
+  vapidSubject: process.env.VAPID_SUBJECT || "mailto:admin@omnivex-academy.xyz",
 
   initialPriceKobo: process.env.MEMBERSHIP_PRICE_KOBO
     ? Number(process.env.MEMBERSHIP_PRICE_KOBO)

@@ -1570,7 +1570,7 @@ const SNIPPETS: [string, string][] = [
   ],
   [
     "Button",
-    `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:22px 0 0;"><tr><td align="center" bgcolor="#280dff" style="border-radius:11px;"><a href="https://omnivex.academy" style="display:inline-block;padding:13px 30px;font-size:14px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:11px;">Call to action</a></td></tr></table>`,
+    `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:22px 0 0;"><tr><td align="center" bgcolor="#280dff" style="border-radius:11px;"><a href="https://omnivex-academy.xyz" style="display:inline-block;padding:13px 30px;font-size:14px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:11px;">Call to action</a></td></tr></table>`,
   ],
   [
     "Bullets",
@@ -1695,7 +1695,7 @@ function EmailAdmin() {
           <div>
             <h2 className="text-sm font-semibold">Email provider · Resend</h2>
             <p className="mt-0.5 text-xs text-mist">
-              Sender: {settings?.senderName || "Omnivex Academy"} &lt;{settings?.senderEmail || "hello@omnivex.manuskripta.xyz"}&gt;
+              Sender: {settings?.senderName || "Omnivex Academy"} &lt;{settings?.senderEmail || "hello@omnivex-academy.xyz"}&gt;
             </p>
           </div>
           <div className="flex flex-wrap gap-2 text-[10px] font-semibold uppercase">

@@ -48,7 +48,7 @@ if [ ! -f .env ]; then
     cp env.template .env
     chmod 600 .env
     say ".env created from env.template."
-    echo "Fill in ADMIN_PASSWORD and APP_URL, then run this script again."
+    echo "Fill in ADMIN_PASSWORD (APP_URL is already set to the root domain), then run this script again."
     exit 1
   fi
   say "No .env and no env.template — cannot configure the app."

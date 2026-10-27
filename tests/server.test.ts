@@ -691,7 +691,7 @@ describe("email broadcasts & webhooks", () => {
     };
     expect(s.emailProvider).toBe("resend");
     expect(s.senderName).toBe("Omnivex Academy");
-    expect(s.senderEmail).toBe("hello@omnivex.manuskripta.xyz");
+    expect(s.senderEmail).toBe("hello@omnivex-academy.xyz");
     expect(s.resendConfigured).toBe(false); // no key in the test env
     expect(s.resendWebhookConfigured).toBe(true);
     expect(s.webhooks.resend.endsWith("/api/webhooks/resend")).toBe(true);
@@ -854,7 +854,7 @@ describe("email broadcasts & webhooks", () => {
       activity: { email: string; status: string }[];
     };
     expect(a.configured).toBe(false);
-    expect(a.sender).toBe("Omnivex Academy <hello@omnivex.manuskripta.xyz>");
+    expect(a.sender).toBe("Omnivex Academy <hello@omnivex-academy.xyz>");
     expect(a.activity.length).toBeGreaterThan(0);
   });
 

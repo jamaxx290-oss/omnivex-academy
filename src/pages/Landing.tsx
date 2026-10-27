@@ -496,7 +496,7 @@ export default function Landing() {
               Sign in
             </Link>
             <a
-              href="mailto:hello@omnivex.manuskripta.xyz"
+              href="mailto:hello@omnivex-academy.xyz"
               className="transition hover:text-white"
             >
               Support

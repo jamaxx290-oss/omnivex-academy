@@ -107,7 +107,7 @@ export function wrapEmail({ preheader, contentHtml }: WrapArgs): string {
 
               <p style="margin:18px 0 0;font-size:12px;line-height:1.7;color:${BRAND.mist};">
                 © ${yearLine()} ${escapeHtml(BRAND.name)} · Premium Amazon KDP mentorship &amp; community.<br/>
-                You're receiving this because you have an account at omnivex.academy.
+                You're receiving this because you have an account at omnivex-academy.xyz.
               </p>
             </td>
           </tr>

@@ -11,12 +11,17 @@ services:
     restart: unless-stopped
     ports:
       # Host port comes from PORT in .env; the container always listens on 3000.
-      - "${PORT:-3000}:3000"
+      # 127.0.0.1 keeps it off the public internet — nginx on the VPS fronts
+      # omnivex-academy.xyz (root domain) and proxies to this container.
+      # Your other apps keep their own subdomains and ports untouched.
+      - "127.0.0.1:${PORT:-3000}:3000"
     env_file:
       - .env
     environment:
       NODE_ENV: production
       PORT: "3000"
+      # Public origin (root domain) — taken from APP_URL in .env via env_file,
+      # must match the host nginx proxies to this container.
       # Persist SQLite + uploads on the named volume below.
       DATA_DIR: /app/data
       DATABASE_URL: /app/data/omnivex.db

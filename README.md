@@ -56,8 +56,9 @@ What the container gives you:
 - **Health checks.** Docker polls `/api/health` and restarts the container if it
   stops answering.
 
-Environment: fill `.env` from `env.template` — at minimum `ADMIN_PASSWORD` and
-`APP_URL` (add `PAYSTACK_SECRET_KEY`/`PAYSTACK_PUBLIC_KEY` to take payments).
+Environment: fill `.env` from `env.template` — at minimum `ADMIN_PASSWORD`
+(`APP_URL` already defaults to `https://omnivex-academy.xyz`, the root domain;
+`PAYSTACK_*` and `RESEND_API_KEY` are optional extras).
 If you already have a `./data/omnivex.db` from the old pm2 setup, copy it into
 the volume before first start:
 
@@ -72,7 +73,7 @@ docker run --rm -v "$PWD/data:/src" -v omnivex_omnivex-data:/dst alpine \
 ```bash
 npm install
 npm run dev      # frontend only → http://localhost:5173 (needs the API running too)
-npm start        # API + built dist/ → http://localhost:3000
+npm start        # API + built dist/ → http://127.0.0.1:3000 (root domain via your reverse proxy)
 npm run typecheck
 npm test         # end-to-end suite over the real express app + sqlite
 npm run build    # typecheck + vite build
