@@ -396,6 +396,7 @@ export const uploads = sqliteTable(
     path: text("path").notNull().unique(),
     mime: text("mime").notNull(),
     size: integer("size").notNull(),
+    original_name: text("original_name"), // filename as chosen by the uploader
     kind: text("kind").notNull().default("message"), // 'message' | 'avatar'
     group_id: text("group_id"),
     conversation_id: text("conversation_id"),

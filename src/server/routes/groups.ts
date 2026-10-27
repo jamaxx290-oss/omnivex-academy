@@ -87,6 +87,8 @@ export type SerializedMessage = {
   mediaPath: string | null;
   mediaUrl: string | null;
   mediaMime: string | null;
+  fileName: string | null;
+  fileSize: number | null;
   durationMs: number | null;
   replyToId: string | null;
   replyTo: null | {
@@ -110,6 +112,31 @@ async function serializeMessages(rows: MessageRow[]): Promise<SerializedMessage[
     .filter((x): x is string => Boolean(x));
   const users = await displayUsers([...senderIds, ...replyIds]);
 
+  // original filenames + sizes (documents are opened externally by name)
+  const mediaPaths = [
+    ...new Set(
+      rows.map((r) => r.media_path).filter((p): p is string => Boolean(p)),
+    ),
+  ];
+  const fileMap: Record<
+    string,
+    { original_name: string | null; size: number | null }
+  > = {};
+  if (mediaPaths.length) {
+    const fileRows = sqlite
+      .prepare(
+        `SELECT path, original_name, size FROM uploads WHERE path IN (${mediaPaths
+          .map(() => "?")
+          .join(",")})`,
+      )
+      .all(...mediaPaths) as {
+      path: string;
+      original_name: string | null;
+      size: number | null;
+    }[];
+    for (const f of fileRows) fileMap[f.path] = f;
+  }
+
   // load referenced replies
   let replyMap: Record<string, MessageRow> = {};
   if (replyIds.length) {
@@ -125,6 +152,7 @@ async function serializeMessages(rows: MessageRow[]): Promise<SerializedMessage[
   return rows.map((r) => {
     const reply = r.reply_to_id ? replyMap[r.reply_to_id] : undefined;
     const mediaUrl = r.media_path ? `/media/${r.media_path}` : null;
+    const file = r.media_path ? fileMap[r.media_path] : undefined;
     return {
       id: r.id,
       scope: r.scope as "group" | "dm",
@@ -136,7 +164,9 @@ async function serializeMessages(rows: MessageRow[]): Promise<SerializedMessage[
       body: r.deleted_at ? null : r.body,
       mediaPath: r.media_path,
       mediaUrl: r.deleted_at ? null : mediaUrl,
-      mediaMime: r.media_mime,
+      mediaMime: r.media_mime ?? null,
+      fileName: r.deleted_at ? null : (file?.original_name ?? null),
+      fileSize: file?.size ?? r.media_size ?? null,
       durationMs: r.duration_ms,
       replyToId: r.reply_to_id,
       replyTo: reply
@@ -527,7 +557,7 @@ router.get(
 
 const sendSchema = z.object({
   body: z.string().max(4000).optional(),
-  type: z.enum(["text", "image", "video", "audio"]).default("text"),
+  type: z.enum(["text", "image", "video", "audio", "file"]).default("text"),
   mediaPath: z.string().max(500).optional(),
   durationMs: z.number().int().min(0).max(3600000).optional(),
   replyToId: z.string().max(100).optional(),
@@ -573,10 +603,13 @@ router.post(
     }
 
     // validate media ownership/scoping
+    const mediaRec = input.mediaPath
+      ? await db.query.uploads.findFirst({
+          where: eq(uploads.path, input.mediaPath),
+        })
+      : null;
     if (input.mediaPath) {
-      const rec = await db.query.uploads.findFirst({
-        where: eq(uploads.path, input.mediaPath),
-      });
+      const rec = mediaRec;
       if (!rec || rec.owner_id !== u.id) {
         return res.status(400).json({ error: "Unknown media path" });
       }
@@ -596,8 +629,8 @@ router.post(
       type: input.type,
       body: input.type === "text" ? (input.body || "").trim() : input.body || null,
       media_path: input.mediaPath || null,
-      media_mime: null,
-      media_size: null,
+      media_mime: input.mediaPath ? mediaRec?.mime ?? null : null,
+      media_size: input.mediaPath ? mediaRec?.size ?? null : null,
       duration_ms: input.durationMs ?? null,
       reply_to_id: replyToId,
       created_at: now,
@@ -999,10 +1032,13 @@ router.post(
       replyToId = target.id;
     }
 
+    const mediaRec = input.mediaPath
+      ? await db.query.uploads.findFirst({
+          where: eq(uploads.path, input.mediaPath),
+        })
+      : null;
     if (input.mediaPath) {
-      const rec = await db.query.uploads.findFirst({
-        where: eq(uploads.path, input.mediaPath),
-      });
+      const rec = mediaRec;
       if (!rec || rec.owner_id !== u.id) {
         return res.status(400).json({ error: "Unknown media path" });
       }
@@ -1026,6 +1062,8 @@ router.post(
       type: input.type,
       body: input.type === "text" ? (input.body || "").trim() : input.body || null,
       media_path: input.mediaPath || null,
+      media_mime: input.mediaPath ? mediaRec?.mime ?? null : null,
+      media_size: input.mediaPath ? mediaRec?.size ?? null : null,
       duration_ms: input.durationMs ?? null,
       reply_to_id: replyToId,
       created_at: new Date(),

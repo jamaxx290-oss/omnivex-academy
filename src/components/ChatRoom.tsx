@@ -27,10 +27,25 @@ const QUICK_EMOJI = [
   "✅", "🚀", "❤️", "😮", "🤔", "👏", "💡", "⭐",
 ];
 
-function typeFromMime(mime: string): "image" | "video" | "audio" {
+function typeFromMime(mime: string): "image" | "video" | "audio" | "file" {
   if (mime.startsWith("image/")) return "image";
   if (mime.startsWith("video/")) return "video";
-  return "audio";
+  if (mime.startsWith("audio/")) return "audio";
+  return "file"; // PDF/DOCX/… — opened in an external app, never rendered here
+}
+
+/** The uploaded filename, stripping the server's `uuid_timestamp_` prefix. */
+function displayName(m: ChatMessage): string {
+  if (m.fileName) return m.fileName;
+  const base = decodeURIComponent((m.mediaPath || "").split("/").pop() || "Document");
+  return base.replace(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_\d+_/i, "");
+}
+
+function formatBytes(bytes: number | null): string {
+  if (!bytes || bytes <= 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function sameDay(a: string, b: string): boolean {
@@ -289,7 +304,7 @@ export default function ChatRoom({
 
   async function send(payload: {
     body?: string;
-    type?: "text" | "image" | "video" | "audio";
+    type?: ChatMessage["type"];
     mediaPath?: string;
     durationMs?: number;
   }) {
@@ -610,7 +625,7 @@ export default function ChatRoom({
                 <input
                   ref={fileRef}
                   type="file"
-                  accept="image/*,video/*,audio/*"
+                  accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.rtf,.txt,.csv"
                   className="hidden"
                   onChange={(e) => {
                     const f = e.target.files?.[0];
@@ -636,7 +651,7 @@ export default function ChatRoom({
                   disabled={uploading || sending}
                   className="focus-ring flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-line text-mist transition hover:border-accent hover:text-white disabled:opacity-50"
                   aria-label="Attach file"
-                  title="Attach image, video, or audio"
+                  title="Attach image, video, audio, or document"
                 >
                   {uploading ? (
                     <span className="h-4 w-4 animate-spin rounded-full border-2 border-line border-t-accent" />
@@ -861,6 +876,34 @@ function MessageBubble({
                 </p>
               ) : null}
             </div>
+          ) : m.type === "file" && m.mediaUrl ? (
+            <span className="block w-[min(20rem,78vw)]">
+              <a
+                href={m.mediaUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="focus-ring flex items-center gap-3 rounded-xl border border-line bg-black/40 p-3 transition hover:border-accent"
+              >
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-accent-soft text-lg">
+                  📄
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-sm font-semibold text-white">
+                    {displayName(m)}
+                  </span>
+                  <span className="mt-0.5 block text-[11px] text-mist">
+                    {(displayName(m).split(".").pop() || "file").toUpperCase().slice(0, 5)}
+                    {formatBytes(m.fileSize) ? ` · ${formatBytes(m.fileSize)}` : ""}
+                  </span>
+                </span>
+                <span className="shrink-0 rounded-lg border border-accent/50 bg-accent-soft px-2.5 py-1.5 text-[11px] font-semibold text-white">
+                  Open
+                </span>
+              </a>
+              <span className="mt-1 block text-[10px] text-mist">
+                Opens in another app on your device — documents are never shown here.
+              </span>
+            </span>
           ) : m.mediaUrl ? (
             <a
               href={m.mediaUrl}

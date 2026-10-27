@@ -1,150 +1,84 @@
 # Omnivex Academy
 
-A premium, mobile-first mentorship & community platform for Amazon KDP authors:
-real-time group chats and DMs, email-OTP authentication, naira payments through
-Paystack, web push notifications, and a full admin panel — packaged as an
-installable PWA.
+Self-hosted **Amazon KDP mentorship & community platform** (PWA) for Omnivex:
+email/OTP auth, gated mentorship groups, DMs, voice notes/images/video in chat,
+**document attachments (PDF/DOCX/… that open in an external app)**, calls,
+announcements, web push, broadcast email (Resend), and one-time Paystack
+membership activation.
 
-## Stack
-
-- **Frontend:** React 19 + Vite + TypeScript, TanStack Query, Tailwind CSS v4,
-  Socket.IO client, vite-plugin-pwa (injectManifest)
-- **Backend:** Express 5, Better Auth (Drizzle adapter, email-OTP plugin),
-  Drizzle ORM, Socket.IO, web-push, Zod, multer
-- **Database:** SQLite (better-sqlite3) with ordered, idempotent migrations
-- **Payments:** Paystack (initialize → redirect → server-side verify + webhook)
-
-## Quick start
-
-```bash
-npm install
-cp env.template .env     # then edit the values — see below
-npm run dev              # API on :3000, Vite dev server on :5173
-```
-
-Production-style run (single process serving API + built frontend):
-
-```bash
-npm run build            # typecheck + vite build → dist/
-npm start                # Express serves dist/ + /api + /socket.io on $PORT
-```
-
-Other scripts: `npm test` (integration suite), `npm run typecheck`,
-and `./deploy.sh` (containerized one-command VPS deploy — see below).
+- **Stack:** React 19 + Vite 8 + Tailwind v4 (frontend), Express 5 + Socket.IO,
+  better-auth + Drizzle + SQLite (backend), `node-cron`-style scheduler not used.
+- **Preview commands:** `install: npm install` · `start: npm start` (API + built
+  `dist/` on `PORT`) · `build: npm run build` (typecheck + vite build → `dist/`).
+- **Sign-up fields:** full name, WhatsApp number, country, state/region, gender.
+- **Logo source of truth:** `public/logo.svg` (white compass ring, violet accent
+  arc and needle on transparent background) plus exported `public/logo.png`.
+- **Emails:** all templates live in `src/server/emailTemplates.ts`, styled with
+  the brand tokens declared in `src/server/emailTheme.ts`. Every template takes
+  a preheader, a headline, human-readable intro copy and an optional CTA.
+- **Auth screens** (`src/pages/Auth.tsx`) use a light gradient background
+  (`#eef2ff → #e0e7ff → #f5f3ff`), a floating canvas-colored card that overlaps
+  a left-side brand hero, violet accents and semantic field labels.
 
 ## Deploy to a VPS (one command)
 
-Built for a small shared VPS — **1 vCPU / 1 GB RAM / 2 GB swap / ~35 GB
-SSD** — with the app inside a Docker container so it stays isolated from
-everything else running on the server:
+The app is containerised, so it stays isolated from the other apps on your
+server. It is sized for a small box: **1 vCPU / 1 GB RAM / 2 GB swap / 35 GB SSD**
+(the image build is memory-bounded and the runtime heap is capped).
+
+First time only:
 
 ```bash
-git pull
-./deploy.sh        # builds the image, mounts the data volume, starts, health-checks
+curl -fsSL https://get.docker.com | sh   # if Docker isn't installed
+chmod +x deploy.sh
+./deploy.sh                              # creates .env from env.template → fill it → run again
 ```
 
-The first run creates `.env` from `env.template`; fill in at least
-`ADMIN_PASSWORD` and `APP_URL` (`nano .env`) and run `./deploy.sh` again.
-The SQLite database and uploads live in the named Docker volume
-`omnivex_omnivex-data` (mounted at `/app/data`), so rebuilds and redeploys
-never touch your data — back it up any time with `./deploy.sh backup`.
-The host port comes from `PORT` in `.env` (the container always listens on
-3000); other helpers: `./deploy.sh logs | restart | stop | status`.
-
-The image build runs with a bounded heap (`--max-old-space-size=600`) and
-the runtime container is capped at 768 MB with a fixed 384 MB Node heap,
-so a 1 GB box stays comfortable — keep the 2 GB swap file active (the
-script prints the one-liner if swap is missing).
-
-Coming from the earlier pm2 install? Seed the volume once:
+Every deploy after that:
 
 ```bash
-docker run --rm -v omnivex_omnivex-data:/data -v "$PWD/data":/src alpine cp -a /src/. /data/
+git pull && ./deploy.sh
 ```
 
-## Environment variables
+`deploy.sh` installs nothing exotic: it checks Docker/Compose, warns if swap is
+below 1.5 GB (and prints the 2 GB swap one-liner), builds the image, starts the
+container, waits for `/api/health`, and prints status. Helper subcommands:
+`./deploy.sh logs | restart | stop | status | backup`.
 
-Copy this block into `.env` (start from `env.template`) and edit it:
+What the container gives you:
+
+- **Persistent data.** SQLite + uploads live on the named Docker volume
+  `omnivex_omnivex-data`, mounted at `/app/data`, so rebuilds never touch your data.
+- **Isolation.** `mem_limit: 768m` + a fixed Node heap keep the app inside its
+  slice of the box while other services run alongside it.
+- **Secrets stay out of the image.** `.env` is passed at runtime via `env_file`
+  and excluded from the build context (`.dockerignore`).
+- **Health checks.** Docker polls `/api/health` and restarts the container if it
+  stops answering.
+
+Environment: fill `.env` from `env.template` — at minimum `ADMIN_PASSWORD` and
+`APP_URL` (add `PAYSTACK_SECRET_KEY`/`PAYSTACK_PUBLIC_KEY` to take payments).
+If you already have a `./data/omnivex.db` from the old pm2 setup, copy it into
+the volume before first start:
 
 ```bash
-# App
-PORT=3000
-APP_URL=http://localhost:3000          # public URL (used in Paystack callbacks)
-BETTER_AUTH_URL=http://localhost:3000
-BETTER_AUTH_SECRET=change-me-to-a-long-random-string
-
-# Data (optional — defaults shown)
-# DATA_DIR=./data
-# DATABASE_URL=./data/omnivex.db
-
-# Admin bootstrap: created or promoted to admin on first boot (never hardcoded)
-ADMIN_EMAIL=founder@example.com
-ADMIN_PASSWORD=choose-a-strong-password
-
-# Membership price in kobo until changed in the admin panel (₦5,000 = 500000)
-MEMBERSHIP_PRICE_KOBO=500000
-
-# Transactional email + broadcasts (Resend). The sending domain
-# (omnivex.manuskripta.xyz) must be verified in the Resend dashboard first.
-# Without a key, outgoing mail is captured in the dev_outbox table; in
-# development the OTP is readable at GET /api/dev/last-otp?email=you@example.com
-RESEND_API_KEY=
-RESEND_FROM_NAME="Omnivex Academy"
-RESEND_FROM_EMAIL=hello@omnivex.manuskripta.xyz
-# Signing secret from Resend → Webhooks (starts with whsec_). Enables
-# POST /api/webhooks/resend → live delivered/bounced status in the admin panel.
-RESEND_WEBHOOK_SECRET=
-
-# Payments (Paystack). Checkout stays disabled until both keys are set.
-PAYSTACK_SECRET_KEY=
-PAYSTACK_PUBLIC_KEY=
-
-# Web push (VAPID). Auto-generated and persisted in the database when unset.
-VAPID_SUBJECT=mailto:admin@omnivex.academy
+docker compose down 2>/dev/null || true
+docker run --rm -v "$PWD/data:/src" -v omnivex_omnivex-data:/dst alpine \
+  sh -c "cp -a /src/. /dst/ && chown -R 1000:1000 /dst"
 ```
 
-> `.env` / `.env.local` are loaded automatically by the Freebuff environment.
-> Never commit real secrets.
+## Development
 
-## Product flows
+```bash
+npm install
+npm run dev      # frontend only → http://localhost:5173 (needs the API running too)
+npm start        # API + built dist/ → http://localhost:3000
+npm run typecheck
+npm test         # end-to-end suite over the real express app + sqlite
+npm run build    # typecheck + vite build
+```
 
-1. **Join** — sign up with name/email/password → 6-digit OTP emailed by Resend →
-   `/verify` auto-submits the code → session established.
-2. **Activate** — paywall shows the current price and terms (versioned; members
-   must accept the latest version). Paystack checkout opens; on return,
-   `/pay/callback` verifies the reference **server-side** before granting
-   access. The webhook is HMAC-SHA512 signature-checked and idempotent, so
-   activation works even if the browser never returns.
-3. **Community** — mentorship groups with unread badges, replies with
-   jump-to-message, image/video upload, voice notes (MediaRecorder), emoji, and
-   1:1 DMs — all live through Socket.IO rooms (`group:<id>`, `dm:<id>`,
-   `user:<id>`).
-4. **Admin panel** (`/admin`) — dashboard stats, member search + actions
-   (grant/revoke membership, ban/unban, set expiry, resend verification,
-   delete), group management (create/edit/archive, member rosters, post
-   policies), payment records with re-verification, pricing & terms editor,
-   one-click announcements with push delivery, and an **Email studio**: a
-   tap-in HTML snippet composer (headings, paragraphs, buttons, cards,
-   callouts, images) with live inbox preview, test sends, broadcasts to every
-   active member through the premium template, per-recipient delivery status
-   from Resend webhooks, and copy-ready webhook URLs for the Resend and
-   Paystack dashboards.
-
-## Security notes
-
-- Media files are stored outside the web root and served through
-  `/media/*` with per-user ACL checks (owner, group members, conversation
-  participants, admins) and HTTP Range support.
-- Admin routes read the role from the database on every request; there is no
-  client-side path to grant it.
-- Banning revokes all sessions but keeps credentials, so unban restores access.
-- Password changes revoke every session, then require a fresh sign-in.
-- Rate limits: 60 requests/15min on `/api/auth`, 60 uploads/10min, and a global
-  600/min API limiter (relaxed automatically in tests).
-
-## PWA
-
-`vite-plugin-pwa` (injectManifest) compiles `src/sw.ts`, which precaches the
-build, serves an offline shell, and renders web-push notifications
-(with click-through focus). App icons come from the brand logo at
-`public/logo.png` (favicon, PWA + maskable icon, and push notification icon).
+Earlier handoff notes: `.logo-preview.png` / `logo-preview.png` / `run.js` /
+`score.js` / `score2.js` are throwaway logo-generation scratch files from a prior
+task and are not part of the app. `isolate/assets/` is a stale generated bundle
+snapshot from that scratch work, also ignored by git.

@@ -260,8 +260,32 @@ describe("membership gating", () => {
     expect(status.status).toBe(200);
     expect((status.data as { configured: boolean }).configured).toBe(false);
 
-    const init = await member.req("/api/payments/initialize", { method: "POST" });
+    const terms = await member.req("/api/payments/terms");
+    expect(terms.status).toBe(200);
+    const version = (terms.data as { version: number }).version;
+
+    const init = await member.req("/api/payments/initialize", {
+      method: "POST",
+      body: { termsVersion: version },
+    });
     expect(init.status).toBeGreaterThanOrEqual(400);
+    expect((init.data as { code?: string }).code).toBe("PAYSTACK_NOT_CONFIGURED");
+  });
+
+  it("refuses checkout until the current terms are accepted", async () => {
+    const terms = await member.req("/api/payments/terms");
+    const version = (terms.data as { version: number }).version;
+
+    const missing = await member.req("/api/payments/initialize", { method: "POST" });
+    expect(missing.status).toBe(400);
+    expect((missing.data as { code?: string }).code).toBe("TERMS_REQUIRED");
+
+    const stale = await member.req("/api/payments/initialize", {
+      method: "POST",
+      body: { termsVersion: version + 1 },
+    });
+    expect(stale.status).toBe(400);
+    expect((stale.data as { code?: string }).code).toBe("TERMS_REQUIRED");
   });
 
   it("rejects an unsigned webhook", async () => {
@@ -523,6 +547,7 @@ describe("direct messages", () => {
 
 describe("media uploads", () => {
   let mediaPath = "";
+  let pdfPath = "";
 
   it("uploads an image and serves it to the owner", async () => {
     const png = Buffer.from(
@@ -572,6 +597,68 @@ describe("media uploads", () => {
     expect(res.status).toBe(201);
     const msg = (res.data as { message: { type: string; mediaUrl: string } }).message;
     expect(msg.type).toBe("image");
+    expect(msg.mediaUrl).toContain("/media/");
+  });
+
+  it("uploads a PDF and serves it as a download, never inline", async () => {
+    const fd = new FormData();
+    fd.append(
+      "file",
+      new Blob([Buffer.from("%PDF-1.4\n% omnivex")], { type: "application/pdf" }),
+      "kdp-checklist.pdf",
+    );
+    fd.append("group_id", groupId);
+
+    const res = await member.req("/api/uploads", { method: "POST", raw: fd });
+    expect(res.status).toBe(201);
+    pdfPath = String((res.data as { path: string }).path);
+    expect((res.data as { name: string }).name).toBe("kdp-checklist.pdf");
+
+    const dl = await fetch(`${base}/media/${pdfPath}`, {
+      headers: { Cookie: [...member.cookies.entries()].map(([k, v]) => `${k}=${v}`).join("; ") },
+    });
+    expect(dl.status).toBe(200);
+    expect(dl.headers.get("content-type")).toContain("application/pdf");
+    expect(dl.headers.get("content-disposition")).toBe(
+      'attachment; filename="kdp-checklist.pdf"',
+    );
+    expect(dl.headers.get("x-content-type-options")).toBe("nosniff");
+  });
+
+  it("accepts DOCX and other document formats", async () => {
+    const fd = new FormData();
+    fd.append(
+      "file",
+      new Blob([Buffer.from("PK\x03\x04 docx-bytes")], {
+        type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      }),
+      "chapter-one.docx",
+    );
+    fd.append("group_id", groupId);
+    const docx = await member.req("/api/uploads", { method: "POST", raw: fd });
+    expect(docx.status).toBe(201);
+    expect(String((docx.data as { mime: string }).mime)).toContain("wordprocessingml");
+    expect(String((docx.data as { name: string }).name)).toBe("chapter-one.docx");
+
+    const csv = new FormData();
+    csv.append("file", new Blob([Buffer.from("title,rank\n")], { type: "text/csv" }), "ranks.csv");
+    csv.append("group_id", groupId);
+    const csvRes = await member.req("/api/uploads", { method: "POST", raw: csv });
+    expect(csvRes.status).toBe(201);
+    expect((csvRes.data as { mime: string }).mime).toBe("text/csv");
+  });
+
+  it("sends a document as a file message carrying its filename", async () => {
+    const res = await member.req(`/api/groups/${groupId}/messages`, {
+      method: "POST",
+      body: { type: "file", mediaPath: pdfPath },
+    });
+    expect(res.status).toBe(201);
+    const msg = (res.data as {
+      message: { type: string; fileName: string | null; mediaUrl: string | null };
+    }).message;
+    expect(msg.type).toBe("file");
+    expect(msg.fileName).toBe("kdp-checklist.pdf");
     expect(msg.mediaUrl).toContain("/media/");
   });
 

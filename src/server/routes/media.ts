@@ -28,7 +28,69 @@ const ALLOWED_MIME = new Set([
   "audio/ogg",
   "audio/wav",
   "audio/x-m4a",
+  // Documents — stored as-is and always handed to an external app to open.
+  "application/pdf",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-powerpoint",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "application/rtf",
+  "text/rtf",
+  "text/plain",
+  "text/csv",
 ]);
+
+/** MIME types that must never be rendered inside the app. */
+const DOCUMENT_MIME = new Set(
+  [...ALLOWED_MIME].filter(
+    (m) =>
+      m === "application/pdf" ||
+      m.startsWith("application/vnd.") ||
+      m === "application/msword" ||
+      m.startsWith("application/rtf") ||
+      m.startsWith("text/"),
+  ),
+);
+
+/** Extension → MIME fallback for clients that upload documents as octet-stream. */
+const DOC_BY_EXT: Record<string, string> = {
+  pdf: "application/pdf",
+  doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ppt: "application/vnd.ms-powerpoint",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  rtf: "application/rtf",
+  txt: "text/plain",
+  csv: "text/csv",
+};
+
+function isDocument(mime: string): boolean {
+  return DOCUMENT_MIME.has(mime);
+}
+
+/** Browsers may send an empty or generic type for documents — fall back to the extension. */
+function resolveMime(file: { mimetype?: string; originalname?: string }): string {
+  const mime = (file.mimetype || "").toLowerCase();
+  if (mime && mime !== "application/octet-stream") return mime;
+  const ext = path
+    .extname(file.originalname || "")
+    .slice(1)
+    .toLowerCase();
+  return DOC_BY_EXT[ext] || mime || "application/octet-stream";
+}
+
+/** Original filename stripped of control characters/quotes so it is header-safe. */
+function safeOriginalName(name: string | undefined, fallback: string): string {
+  const base = path
+    .basename(String(name || ""))
+    .replace(/[\u0000-\u001f"\\/]/g, "")
+    .trim();
+  return (base || fallback).slice(0, 140);
+}
 
 const MAX_IMAGE = 25 * 1024 * 1024;
 const MAX_VIDEO = 100 * 1024 * 1024;
@@ -36,6 +98,17 @@ const MAX_AUDIO = 8 * 1024 * 1024; // voice notes
 
 function extFor(mime: string): string {
   const map: Record<string, string> = {
+    "application/pdf": "pdf",
+    "application/msword": "doc",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "application/vnd.ms-excel": "xls",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+    "application/vnd.ms-powerpoint": "ppt",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+    "application/rtf": "rtf",
+    "text/rtf": "rtf",
+    "text/plain": "txt",
+    "text/csv": "csv",
     "image/jpeg": "jpg",
     "image/png": "png",
     "image/webp": "webp",
@@ -61,10 +134,11 @@ const storage = multer.diskStorage({
     cb(null, dir);
   },
   filename(_req, file, cb) {
-    if (!ALLOWED_MIME.has(file.mimetype)) {
+    const mime = resolveMime(file);
+    if (!ALLOWED_MIME.has(mime)) {
       return cb(new Error("Unsupported file type") as never, "");
     }
-    cb(null, `${uuid()}_${Date.now()}.${extFor(file.mimetype)}`);
+    cb(null, `${uuid()}_${Date.now()}.${extFor(mime)}`);
   },
 });
 
@@ -91,7 +165,9 @@ router.post("/api/uploads", requireMember, (req: Request, res: Response) => {
     const u = req.appUser as SessionUser;
     if (!file) return res.status(400).json({ error: "No file provided" });
 
-    if (file.size > MAX_IMAGE && !file.mimetype.startsWith("video/")) {
+    const mime = resolveMime(file);
+
+    if (file.size > MAX_IMAGE && !mime.startsWith("video/")) {
       if (file.size > MAX_AUDIO) {
         fs.unlinkSync(file.path);
         return res.status(400).json({ error: "File is too large" });
@@ -112,6 +188,10 @@ router.post("/api/uploads", requireMember, (req: Request, res: Response) => {
     fs.renameSync(file.path, dest);
 
     const id = uuid();
+    const originalName = safeOriginalName(
+      file.originalname,
+      `file.${extFor(mime)}`,
+    );
     const groupId =
       kind === "avatar" && typeof req.body?.group_id === "string"
         ? req.body.group_id
@@ -128,8 +208,9 @@ router.post("/api/uploads", requireMember, (req: Request, res: Response) => {
         id,
         owner_id: u.id,
         path: rel,
-        mime: file.mimetype,
+        mime,
         size: file.size,
+        original_name: originalName,
         kind,
         group_id: groupId,
         conversation_id: convId,
@@ -141,8 +222,9 @@ router.post("/api/uploads", requireMember, (req: Request, res: Response) => {
       id,
       path: rel,
       url: `/media/${rel}`,
-      mime: file.mimetype,
+      mime,
       size: file.size,
+      name: originalName,
     });
   });
 });
@@ -199,6 +281,16 @@ const MIME_BY_EXT: Record<string, string> = {
   mp3: "audio/mpeg",
   ogg: "audio/ogg",
   wav: "audio/wav",
+  pdf: "application/pdf",
+  doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ppt: "application/vnd.ms-powerpoint",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  rtf: "application/rtf",
+  txt: "text/plain",
+  csv: "text/csv",
 };
 
 /** GET /media/<relative path> — requires session; supports HTTP Range for playback. */
@@ -221,7 +313,7 @@ router.get("/media/*path", async (req: Request, res: Response) => {
 
   const rec = sqlite
     .prepare(
-      "SELECT owner_id, kind, group_id, conversation_id, mime FROM uploads WHERE path = ?",
+      "SELECT owner_id, kind, group_id, conversation_id, mime, original_name FROM uploads WHERE path = ?",
     )
     .get(rel) as
     | {
@@ -230,6 +322,7 @@ router.get("/media/*path", async (req: Request, res: Response) => {
         group_id: string | null;
         conversation_id: string | null;
         mime: string;
+        original_name: string | null;
       }
     | undefined;
 
@@ -244,6 +337,14 @@ router.get("/media/*path", async (req: Request, res: Response) => {
   res.setHeader("Content-Type", mime);
   res.setHeader("Accept-Ranges", "bytes");
   res.setHeader("Cache-Control", "private, max-age=86400");
+
+  // Documents are never rendered in the app: force a download so the
+  // device opens them in whatever external app supports the format.
+  if (isDocument(mime)) {
+    const dlName = safeOriginalName(rec?.original_name || undefined, path.basename(abs));
+    res.setHeader("Content-Disposition", `attachment; filename="${dlName}"`);
+    res.setHeader("X-Content-Type-Options", "nosniff");
+  }
 
   const range = req.headers.range;
   if (range) {

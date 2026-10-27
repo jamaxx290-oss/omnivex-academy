@@ -12,111 +12,77 @@
 #   ./deploy.sh logs      tail the app logs
 #   ./deploy.sh restart   restart the container
 #   ./deploy.sh stop      stop the container
-#   ./deploy.sh status    container status
-#   ./deploy.sh backup    tar the database + uploads to ./omnivex-backup-*.tar.gz
+#   ./deploy.sh status    show container status + health
+#   ./deploy.sh backup    copy the database + uploads aside
 # =============================================================
 set -euo pipefail
 cd "$(dirname "$0")"
 
-APP_NAME="omnivex"          # compose service + container name
-VOLUME_NAME="omnivex_omnivex-data"  # compose project (name: omnivex) + volume omnivex-data
+say() { printf '\033[1;35m%s\033[0m\n' "$*"; }
 
-say()  { echo "==> $*"; }
-warn() { echo "!!  $*"; }
-
-# ---- helper subcommands --------------------------------------
-case "${1:-deploy}" in
-  logs)    exec docker compose logs -f --tail 100 "$APP_NAME" ;;
-  restart) exec docker compose restart "$APP_NAME" ;;
-  stop)    exec docker compose stop "$APP_NAME" ;;
-  status)  exec docker compose ps ;;
-  backup)
-    ts="$(date +%Y%m%d-%H%M%S)"
-    out="omnivex-backup-${ts}.tar.gz"
-    docker run --rm -v "$VOLUME_NAME":/data -v "$PWD":/backup alpine \
-      tar czf "/backup/$out" -C /data .
-    say "Backup written: $out"
-    exit 0
-    ;;
-  deploy) ;;
-  *) echo "Usage: $0 [deploy|logs|restart|stop|status|backup]"; exit 2 ;;
-esac
-
-echo "==> Omnivex Academy — container deploy"
-
-# ---- 1. Docker present and running? --------------------------
+# ---- 0. Preflight ----------------------------------------------
 if ! command -v docker >/dev/null 2>&1; then
-  warn "Docker is not installed. Install it first:"
-  echo "    curl -fsSL https://get.docker.com | sh"
+  say "Docker is not installed. Install it first:"
+  echo "  curl -fsSL https://get.docker.com | sh"
   exit 1
 fi
-if ! docker compose version >/dev/null 2>&1; then
-  warn "Docker Compose v2 ('docker compose') is required but missing."
-  exit 1
-fi
-if ! docker info >/dev/null 2>&1; then
-  warn "Cannot talk to the Docker daemon (running? permission?)."
-  echo "    sudo usermod -aG docker \"\$USER\"   # then re-login"
+if docker compose version >/dev/null 2>&1; then
+  COMPOSE=(docker compose)
+elif command -v docker-compose >/dev/null 2>&1; then
+  COMPOSE=(docker-compose)
+else
+  say "Docker Compose is not available. Install the docker-compose-plugin."
   exit 1
 fi
 
-# ---- 2. Swap advisory (a 1 GB box needs it to build) ---------
-swap_kb="$(awk '/SwapTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)"
-if [ "${swap_kb:-0}" -lt 1572864 ]; then
-  warn "Swap is ${swap_kb} kB — 2 GB is recommended on a 1 GB box. Once:"
-  echo "    sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile"
-  echo "    sudo mkswap /swapfile && sudo swapon /swapfile"
-  echo "    echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab"
+SWAP_KB=$(awk '/^SwapTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+if [ "${SWAP_KB:-0}" -lt 1572864 ]; then
+  say "WARNING: less than 1.5 GB swap detected — the 1 GB build may thrash."
+  echo "Create a 2 GB swap file with:"
+  echo "  sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile"
 fi
 
-# ---- 3. Secrets ---------------------------------------------
+# ---- 1. Environment secrets ------------------------------------
 if [ ! -f .env ]; then
   if [ -f env.template ]; then
     cp env.template .env
-    echo ""
-    warn "Created .env from env.template."
-    warn "Fill in the secrets now:   nano .env"
-    warn "(ADMIN_PASSWORD and APP_URL at minimum), then run ./deploy.sh again."
+    chmod 600 .env
+    say ".env created from env.template."
+    echo "Fill in ADMIN_PASSWORD and APP_URL, then run this script again."
     exit 1
   fi
-  warn "No .env file found. Create one (see env.template) and run ./deploy.sh again."
+  say "No .env and no env.template — cannot configure the app."
   exit 1
 fi
 
-# Read only what this script needs — never print secret values.
-app_port_raw="$(grep -E '^PORT=' .env | tail -1 | cut -d= -f2- | tr -d '"' | tr -d "'" || true)"
-HOST_PORT="${app_port_raw:-3000}"
-grep -qE '^ADMIN_PASSWORD[[:space:]]*=[[:space:]]*$' .env \
-  && warn "ADMIN_PASSWORD is empty in .env — the bootstrap admin cannot be created."
-grep -qE '^APP_URL[[:space:]]*=[[:space:]]*$' .env \
-  && warn "APP_URL is empty — email links and Paystack callbacks will be wrong."
-true  # grep -q returns 1 when the line is absent; keep set -e happy
+# shellcheck disable=SC1091
+set -a; . ./.env; set +a
+if [ -z "${ADMIN_PASSWORD:-}" ]; then
+  say "WARNING: ADMIN_PASSWORD is empty in .env — the first admin sign-in needs it."
+fi
 
-# ---- 4. Build the image -------------------------------------
-say "Building the container image (npm ci + typecheck + vite build, memory-bounded)"
-docker compose build
+# ---- 2. Persistent data folder ---------------------------------
+mkdir -p data
+if [ "$(id -u)" = "0" ]; then chown -R 1000:1000 data || true; fi
 
-# ---- 5. (Re)start with the persistent data mount ------------
-say "Starting container — database + uploads live on the ${VOLUME_NAME} volume"
-docker compose up -d
+# ---- 3. Build + start the container ---------------------------
+say "Building the image (bounded memory)…"
+"${COMPOSE[@]}" build --build-arg NODE_OPTIONS=--max-old-space-size=512
 
-# ---- 6. Health check ----------------------------------------
-printf '==> Waiting for the app on port %s' "$HOST_PORT"
-for _ in $(seq 1 45); do
-  if curl -fsS "http://127.0.0.1:${HOST_PORT}/api/health" >/dev/null 2>&1; then
-    echo ""
-    say "✅ Deployed and healthy on port ${HOST_PORT}"
-    echo "   URL:      set APP_URL in .env to your domain, then open it"
-    echo "   Logs:     ./deploy.sh logs"
-    echo "   Restart:  ./deploy.sh restart    Stop: ./deploy.sh stop"
-    echo "   Backup:   ./deploy.sh backup     (tar of database + uploads)"
+say "Starting the container…"
+"${COMPOSE[@]}" up -d
+
+# ---- 4. Health check -------------------------------------------
+say "Waiting for the app to become healthy…"
+for i in $(seq 1 40); do
+  if curl -fsS "http://127.0.0.1:${PORT:-3000}/api/health" >/dev/null 2>&1; then
+    say "✔ Omnivex Academy is up on port ${PORT:-3000}"
+    "${COMPOSE[@]}" ps
     exit 0
   fi
-  echo -n "."
-  sleep 2
+  sleep 3
 done
 
-echo ""
-warn "The app did not become healthy in 90 seconds."
-echo "   Check: ./deploy.sh logs"
+say "The app did not answer /api/health in time. Logs:"
+"${COMPOSE[@]}" logs --tail=120
 exit 1

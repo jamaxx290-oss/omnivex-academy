@@ -46,6 +46,16 @@ router.post(
     if (u.membership_status === "active") {
       return res.status(400).json({ error: "Membership is already active" });
     }
+    // The terms are a must-read: checkout only starts when the client confirms
+    // it accepted the terms version currently in force.
+    const terms = getTerms();
+    const acceptedVersion = Number(req.body?.termsVersion);
+    if (!Number.isFinite(acceptedVersion) || acceptedVersion !== terms.version) {
+      return res.status(400).json({
+        error: `Please read and accept the academy terms (v${terms.version}) before paying.`,
+        code: "TERMS_REQUIRED",
+      });
+    }
     const result = await initializePayment(u.id);
     if (!result.ok) {
       return res

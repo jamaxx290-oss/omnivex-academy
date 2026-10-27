@@ -290,6 +290,12 @@ CREATE TABLE IF NOT EXISTS calls (
 CREATE INDEX IF NOT EXISTS calls_group_idx ON calls (group_id, ended_at);
 `,
   },
+  {
+    id: "006_upload_original_name",
+    sql: `
+ALTER TABLE uploads ADD COLUMN original_name TEXT;
+`,
+  },
 ];
 
 function runMigrations(): void {

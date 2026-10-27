@@ -43,11 +43,14 @@ export type ChatMessage = {
   conversationId: string | null;
   senderId: string;
   senderName: string;
-  type: "text" | "image" | "video" | "audio";
+  type: "text" | "image" | "video" | "audio" | "file";
   body: string | null;
   mediaPath: string | null;
   mediaUrl: string | null;
   mediaMime: string | null;
+  /** Original filename + size for document messages (opened externally). */
+  fileName: string | null;
+  fileSize: number | null;
   durationMs: number | null;
   replyToId: string | null;
   replyTo: ReplyPreview;
