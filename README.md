@@ -29,21 +29,33 @@ server. It is sized for a small box: **1 vCPU / 1 GB RAM / 2 GB swap / 35 GB SSD
 First time only:
 
 ```bash
-curl -fsSL https://get.docker.com | sh   # if Docker isn't installed
 chmod +x deploy.sh
-./deploy.sh                              # creates .env from env.template → fill it → run again
+./deploy.sh     # installs Docker/Compose + swap if missing, creates .env,
+                # prompts for the admin login, builds the image and starts
 ```
 
 Every deploy after that:
+
 
 ```bash
 git pull && ./deploy.sh
 ```
 
-`deploy.sh` installs nothing exotic: it checks Docker/Compose, warns if swap is
-below 1.5 GB (and prints the 2 GB swap one-liner), builds the image, starts the
-container, waits for `/api/health`, and prints status. Helper subcommands:
-`./deploy.sh logs | restart | stop | status | backup`.
+`deploy.sh` handles the whole box itself — no manual prerequisite steps:
+
+- installs **curl, Docker Engine and the Compose plugin** when they are
+  missing (Docker's official `get.docker.com` installer) and starts the
+  daemon if it is not running;
+- creates a **2 GB swap file** (and wires it into `/etc/fstab`) when the box
+  reports under 1.5 GB swap, so the memory-bounded image build survives;
+- creates `.env` from `env.template` and, on an interactive terminal, **prompts
+  for the admin email/password** and generates a `BETTER_AUTH_SECRET`;
+- builds the image, starts the container, waits for `/api/health`, then lists
+  any keys you still need to add and the webhook URLs to register.
+
+Helper subcommands: `./deploy.sh logs | restart | stop | status | backup`
+(`restart` recreates the container so `.env` edits take effect; `backup` writes
+a `VACUUM INTO` database snapshot plus an uploads tarball to `./backups/`).
 
 What the container gives you:
 
@@ -56,9 +68,11 @@ What the container gives you:
 - **Health checks.** Docker polls `/api/health` and restarts the container if it
   stops answering.
 
-Environment: fill `.env` from `env.template` — at minimum `ADMIN_PASSWORD`
-(`APP_URL` already defaults to `https://omnivex-academy.xyz`, the root domain;
-`PAYSTACK_*` and `RESEND_API_KEY` are optional extras).
+Environment: `.env` is created from `env.template` on the first run (the
+script prompts for `ADMIN_PASSWORD`; `APP_URL` already defaults to
+`https://omnivex-academy.xyz`, the root domain). `RESEND_API_KEY`,
+`RESEND_WEBHOOK_SECRET` and `PAYSTACK_*` are optional extras the script
+reminds you about after each deploy.
 If you already have a `./data/omnivex.db` from the old pm2 setup, copy it into
 the volume before first start:
 
