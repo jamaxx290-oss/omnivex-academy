@@ -11,6 +11,13 @@
 # ---- Stage 1: dependencies -------------------------------------
 FROM node:20-slim AS deps
 WORKDIR /app
+# better-sqlite3 is a native module: when a prebuilt binary is not available
+# npm falls back to node-gyp, which needs a toolchain that slim images omit.
+# Only this build stage installs it — the runtime image stays slim, because
+# just /app/node_modules is copied forward.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 make g++ \
+ && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
 
