@@ -30,8 +30,8 @@ First time only:
 
 ```bash
 chmod +x deploy.sh
-./deploy.sh     # installs Docker/Compose + swap if missing, creates .env,
-                # prompts for the admin login, builds the image and starts
+./deploy.sh     # ONE command: prerequisites → .env prompts → build → start
+                # → nginx → Cloudflare DNS/SSL → HTTPS certificate
 ```
 
 Every deploy after that:
@@ -49,13 +49,34 @@ git pull && ./deploy.sh
 - creates a **2 GB swap file** (and wires it into `/etc/fstab`) when the box
   reports under 1.5 GB swap, so the memory-bounded image build survives;
 - creates `.env` from `env.template` and, on an interactive terminal, **prompts
-  for the admin email/password** and generates a `BETTER_AUTH_SECRET`;
-- builds the image, starts the container, waits for `/api/health`, then lists
-  any keys you still need to add and the webhook URLs to register.
+  once** for the admin email/password, a generated `BETTER_AUTH_SECRET`, a
+  Let's Encrypt email and an optional Cloudflare API token — all saved to
+  `.env`, never asked again;
+- builds the image, starts the container and waits for `/api/health` (on
+  timeout it prints container state, OOM flag and logs);
+- **configures nginx** in front of the app (`omnivex-academy.xyz` →
+  `127.0.0.1:3000`, WebSocket upgrade, 100 MB uploads, `nginx -t` guarded,
+  ufw 80/443 opened when ufw is active);
+- **automates Cloudflare** when `CLOUDFLARE_API_TOKEN` is set: creates/updates
+  the proxied A record to this server and sets the SSL mode (Flexible now,
+  Full (strict) once the certificate exists). Without a token it prints the
+  two dashboard steps instead;
+- **gets the HTTPS certificate** (certbot + Let's Encrypt on 443, 80 → 443
+  redirect) when `LETSENCRYPT_EMAIL` is set — skipped if one already exists;
+- finishes by listing any keys you still need to add and the webhook URLs to
+  register.
 
-Helper subcommands: `./deploy.sh logs | restart | stop | status | backup`
+Helper subcommands: `./deploy.sh logs | restart | stop | status | backup | proxy | tls`
 (`restart` recreates the container so `.env` edits take effect; `backup` writes
 a `VACUUM INTO` database snapshot plus an uploads tarball to `./backups/`).
+
+**Domain + HTTPS (Cloudflare):** handled by the plain `./deploy.sh` run —
+you only intervene if it prints a manual step. Error 525 means Cloudflare
+reached the VPS but no origin answered the TLS handshake; `./deploy.sh proxy`
+runs just that step on its own, and `./deploy.sh tls you@example.com` runs
+just the certificate. With `CLOUDFLARE_API_TOKEN` in `.env` there is nothing
+to click in the dashboard at all: the DNS record is created/proxied and the
+SSL mode flips from Flexible to Full (strict) automatically.
 
 What the container gives you:
 
