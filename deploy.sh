@@ -477,6 +477,7 @@ setup_proxy() {
       fi
       warn "Nothing was changed. Free port 80, or tell me which service that is and"
       warn "omnivex-academy.xyz will be wired into it."
+      warn "Full web-layer report: ./deploy.sh doctor  (section 9)"
       exit 1
       ;;
   esac
@@ -551,7 +552,6 @@ do_tls() {
   fi
 
   say "✔ Certificate installed (80 → 443 redirect enabled)."
-  say "Now set Cloudflare → SSL/TLS → Overview to Full (strict)."
 }
 
 # ---- helper subcommands ----------------------------------------
@@ -699,20 +699,23 @@ deploy() {
   say "✔ Omnivex Academy is up on port ${port}"
   "${COMPOSE[@]}" ps
 
-  # ---- 6. nginx in front of the app ---------------------------
-  say "Configuring nginx in front of the app…"
-  setup_proxy
-
-  # ---- 7. Cloudflare: DNS record + SSL mode -------------------
+  # ---- 6. Cloudflare: DNS + a SAFE SSL mode (before any proxy work) ----
+  # Never "flexible": the mode is zone-wide and other hostnames on this zone
+  # (e.g. resurreccion.omnivex-academy.xyz) serve their own HTTPS — flexible
+  # makes their http→https redirect loop forever. "full" is safe for all.
   local cert_ready=0
   if has_cert; then cert_ready=1; fi
   cf_init
   if [ -n "$cf_zone_id" ]; then
     cf_ensure_dns
-    if [ "$cert_ready" = "1" ]; then cf_set_ssl strict; else cf_set_ssl flexible; fi
+    cf_set_ssl full
   else
     cf_hint
   fi
+
+  # ---- 7. reverse proxy in front of the app ----------------------
+  say "Configuring the web server in front of the app…"
+  setup_proxy
 
   # ---- 8. HTTPS certificate (per front-end) --------------------
   if [ "$front_server" = "caddy" ]; then
@@ -743,7 +746,7 @@ deploy() {
     fi
   fi
   if [ "$cert_ready" = "1" ] && [ -n "$cf_zone_id" ]; then
-    cf_set_ssl strict
+    say "Cloudflare stays on Full — safe for every domain on this zone."
   fi
 
   reminders
@@ -856,9 +859,10 @@ cf_set_ssl() {
 }
 
 cf_hint() {
-  warn "No CLOUDFLARE_API_TOKEN in .env — do these two clicks in the Cloudflare dashboard:"
-  warn "  1. DNS → omnivex-academy.xyz → A record to this server, status Proxied (orange cloud)"
-  warn "  2. SSL/TLS → Overview → Encryption mode: Flexible now, Full (strict) after HTTPS"
+  warn "No CLOUDFLARE_API_TOKEN in .env — one dashboard fix keeps every domain working:"
+  warn "  SSL/TLS → Overview → Encryption mode: Full (NOT Flexible — Flexible loops any"
+  warn "  domain on the zone that redirects http→https, e.g. a sibling app)"
+  warn "  DNS → omnivex-academy.xyz → A record to this server, status Proxied (orange cloud)"
 }
 
 has_cert() { run_root test -f /etc/letsencrypt/live/omnivex-academy.xyz/fullchain.pem 2>/dev/null; }
@@ -963,9 +967,36 @@ do_doctor() {
   say "== 8. host memory / swap =="
   free -h || true
   swapon --show || true
+  echo
+
+  say "== 9. web front: ports 80/443, containers, Cloudflare mode =="
+  port80_info
+  local l443
+  l443="$(ss -H -ltnp 2>/dev/null | awk '$4 ~ /:443$/' | head -1 || true)"
+  say "port 80 : ${port80_line:-free}"
+  say "port 443: ${l443:-free}"
+  if command -v docker >/dev/null 2>&1; then
+    "${DOCKER[@]}" ps --format '  container: {{.Names}}  image: {{.Image}}  ports: {{.Ports}}' 2>/dev/null || true
+    local pub
+    for pub in $("${DOCKER[@]}" ps --filter publish=80 --format '{{.Names}}' 2>/dev/null || true); do
+      say "mounts of ${pub}:"
+      "${DOCKER[@]}" inspect "$pub" --format '{{range .Mounts}}  {{.Source}} -> {{.Destination}}{{println}}{{end}}' 2>/dev/null || true
+    done
+  fi
+  cf_init
+  if [ -n "$cf_zone_id" ]; then
+    local ssl_resp
+    ssl_resp="$(cf_call GET "/zones/${cf_zone_id}/settings/ssl" || true)"
+    say "Cloudflare SSL mode: $(printf '%s' "$ssl_resp" | grep -o '"value":"[a-z_]*"' | head -1 || echo unknown)"
+  else
+    warn "Cloudflare: no API token in .env — check SSL/TLS → Overview manually."
+  fi
+  if command -v certbot >/dev/null 2>&1; then
+    run_root certbot certificates 2>/dev/null | grep -E 'Certificate Name|Domains' || say "(no certbot certificates)"
+  fi
 
   echo
-  say "Send the output of sections 3–7 for the fix."
+  say "Send the output of sections 3–9 for the fix."
 }
 
 # ---- 0b. Preflight ---------------------------------------------
@@ -1001,7 +1032,7 @@ case "$CMD" in
     cf_init
     if [ -n "$cf_zone_id" ]; then
       cf_ensure_dns
-      if has_cert; then cf_set_ssl strict; else cf_set_ssl flexible; fi
+      cf_set_ssl full
     else
       cf_hint
     fi
@@ -1013,7 +1044,7 @@ case "$CMD" in
     do_tls "${2:-}" "$front_server" || rc=1
     if [ "$rc" = "0" ]; then
       cf_init
-      if [ -n "$cf_zone_id" ]; then cf_set_ssl strict; else cf_hint; fi
+      if [ -n "$cf_zone_id" ]; then cf_set_ssl full; else cf_hint; fi
     fi
     exit "$rc"
     ;;

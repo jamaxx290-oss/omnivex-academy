@@ -81,7 +81,10 @@ owns port 80, `deploy.sh` recognizes it (nginx, Apache or Caddy) and adds a
 vhost/site block for `omnivex-academy.xyz` to **that** server instead —
 nothing else on the box is touched, and every change is config-tested before
 a reload. Caddy fronts get HTTPS automatically (no certbot); nginx/Apache
-get a Let's Encrypt certificate via certbot. Error 525 means Cloudflare
+get a Let's Encrypt certificate via certbot. The zone's SSL mode is kept on
+**Full** — `deploy.sh` deliberately never sets Flexible, because Flexible is
+zone-wide and breaks any sibling domain (another app on
+`*.omnivex-academy.xyz`) that redirects http → https. Error 525 means Cloudflare
 reached the VPS but no origin answered the TLS handshake; `./deploy.sh proxy`
 runs just that step on its own, and `./deploy.sh tls you@example.com` runs
 just the certificate. With `CLOUDFLARE_API_TOKEN` in `.env` there is nothing
