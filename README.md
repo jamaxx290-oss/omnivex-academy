@@ -76,7 +76,12 @@ tests, kernel segfault records and memory/swap — run it whenever the app is
 down and send the output).
 
 **Domain + HTTPS (Cloudflare):** handled by the plain `./deploy.sh` run —
-you only intervene if it prints a manual step. Error 525 means Cloudflare
+you only intervene if it prints a manual step. If another web server already
+owns port 80, `deploy.sh` recognizes it (nginx, Apache or Caddy) and adds a
+vhost/site block for `omnivex-academy.xyz` to **that** server instead —
+nothing else on the box is touched, and every change is config-tested before
+a reload. Caddy fronts get HTTPS automatically (no certbot); nginx/Apache
+get a Let's Encrypt certificate via certbot. Error 525 means Cloudflare
 reached the VPS but no origin answered the TLS handshake; `./deploy.sh proxy`
 runs just that step on its own, and `./deploy.sh tls you@example.com` runs
 just the certificate. With `CLOUDFLARE_API_TOKEN` in `.env` there is nothing

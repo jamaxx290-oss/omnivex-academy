@@ -14,7 +14,9 @@
 #     secrets (admin login, generated auth secret, Let's Encrypt email,
 #     optional Cloudflare API token) interactively — once
 #   * builds the image, starts the container, waits for /api/health
-#   * installs + configures nginx in front of the app (port 80)
+#   * puts the web server already on port 80 in front of the app
+#     (nginx / Apache / Caddy are all recognized and wired up; nginx is
+#     installed only when port 80 is free)
 #   * points Cloudflare at the server (DNS record, proxied) and sets the
 #     SSL mode automatically when CLOUDFLARE_API_TOKEN is in .env
 #   * gets a Let's Encrypt certificate on 443 (certbot) for Full (strict)
@@ -55,7 +57,7 @@ Commands:
   stop      stop the container
   status    show container status + health
   backup    snapshot database + uploads into ./backups
-  proxy     nginx in front of the app (fixes Cloudflare error 525)
+  proxy     reverse proxy in front of the app (fixes Cloudflare error 525)
   tls EMAIL get a Let's Encrypt certificate on 443 (Cloudflare Full strict)
   doctor    one-shot crash report — run this when the app is down
   help      show this help
@@ -240,36 +242,56 @@ ensure_swap() {
   say "Swap now: $((cur_kb / 1024)) MB."
 }
 
-# ---- nginx in front of the app (Cloudflare origin) ------------
-setup_proxy() {
-  ensure_curl
-  local domain="omnivex-academy.xyz"
-  local port conf_path conf_link="0" tmp listeners fullcfg
+# ---- reverse proxy in front of the app (Cloudflare origin) -----
+# What is holding port 80? Sets port80_line (ss output) + port80_owner.
+port80_line=""
+port80_owner=""
+front_server=""
 
-  port="$(get_env_val PORT)"
-  port="${port:-3000}"
+port80_info() {
+  port80_line="$(ss -H -ltnp 2>/dev/null | awk '$4 ~ /:80$/' | head -1 || true)"
+  port80_owner="$(printf '%s' "$port80_line" | sed -n 's/.*users:(("\([^"]*\)".*/\1/p')"
+}
 
-  if ! command -v nginx >/dev/null 2>&1; then
-    listeners="$(ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -E ':80$' || true)"
-    if [ -n "$listeners" ]; then
-      warn "Port 80 is already used by a service that is not nginx:"
-      printf '%s\n' "$listeners"
-      warn "Make that server proxy to http://127.0.0.1:${port} for ${domain}, or free port 80 and re-run ./deploy.sh proxy."
-      exit 1
-    fi
-    say "Installing nginx…"
-    if command -v apt-get >/dev/null 2>&1; then
-      run_root apt-get update -y >/dev/null 2>&1 || true
-      run_root apt-get install -y nginx >/dev/null
-    elif command -v dnf >/dev/null 2>&1; then
-      run_root dnf install -y nginx >/dev/null
-    elif command -v yum >/dev/null 2>&1; then
-      run_root yum install -y nginx >/dev/null
+# nginx: manage it directly. otherwise reuse whatever already owns :80.
+detect_front() {
+  if command -v nginx >/dev/null 2>&1; then
+    front_server="nginx"
+    return 0
+  fi
+  port80_info
+  case "$port80_owner" in
+    apache2 | httpd | apache) front_server="apache" ;;
+    caddy) front_server="caddy" ;;
+    nginx) front_server="nginx-container" ;;
+    docker | docker-proxy | dockerd | containerd | containerd-shim*) front_server="docker" ;;
+    "") front_server="free" ;;
+    *) front_server="other" ;;
+  esac
+}
+
+service_reload() {
+  local svc="$1"
+  if command -v systemctl >/dev/null 2>&1; then
+    run_root systemctl enable "$svc" >/dev/null 2>&1 || true
+    if systemctl is-active --quiet "$svc" 2>/dev/null; then
+      run_root systemctl reload "$svc"
     else
-      warn "No supported package manager — install nginx yourself, then re-run ./deploy.sh proxy."
-      exit 1
+      run_root systemctl start "$svc"
+    fi
+  elif command -v service >/dev/null 2>&1; then
+    if service "$svc" status >/dev/null 2>&1; then
+      run_root service "$svc" reload
+    else
+      run_root service "$svc" start
     fi
   fi
+}
+
+# nginx (installed by us or already present) — one server block for our domain.
+setup_nginx_proxy() {
+  local domain="$1" port="$2"
+  local conf_path conf_link="0" tmp fullcfg
 
   # Debian keeps extra includes in nginx.conf (conf.d), RHEL uses conf.d too;
   # fall back to the sites-available/sites-enabled layout when present.
@@ -339,23 +361,127 @@ NGINX
       ;;
   esac
 
-  if command -v systemctl >/dev/null 2>&1; then
-    run_root systemctl enable nginx >/dev/null 2>&1 || true
-    if systemctl is-active --quiet nginx 2>/dev/null; then
-      run_root systemctl reload nginx
-    else
-      run_root systemctl start nginx
-    fi
-  elif command -v service >/dev/null 2>&1; then
-    if service nginx status >/dev/null 2>&1; then
-      run_root service nginx reload
-    else
-      run_root service nginx start
-    fi
-  else
-    run_root nginx -s reload 2>/dev/null || run_root nginx
-  fi
+  service_reload nginx
+}
 
+# Existing Apache on :80 — additive vhost, validated before reload.
+setup_apache() {
+  local domain="$1" port="$2"
+  local conf="/etc/apache2/sites-available/omnivex-academy.conf" tmp
+  say "Apache owns port 80 — adding a vhost for ${domain}…"
+  if ! command -v a2enmod >/dev/null 2>&1; then
+    warn "Apache detected but the Debian tooling is missing — point a vhost at http://127.0.0.1:${port} manually."
+    exit 1
+  fi
+  run_root a2enmod proxy proxy_http proxy_wstunnel rewrite headers >/dev/null 2>&1 || true
+  tmp="$(mktemp .apache.tmp.XXXXXX)"
+  cat >"$tmp" <<APACHE
+# Managed by ./deploy.sh proxy — regenerate any time with: ./deploy.sh proxy
+<VirtualHost *:80>
+    ServerName ${domain}
+    ServerAlias www.${domain}
+
+    ProxyPreserveHost On
+    ProxyRequests Off
+
+    RewriteEngine On
+    RewriteCond %{HTTP:Upgrade} =websocket [NC]
+    RewriteRule ^/(.*) ws://127.0.0.1:${port}/\$1 [P,L]
+    RewriteRule ^/(.*) http://127.0.0.1:${port}/\$1 [P,L]
+
+    ProxyPassReverse / http://127.0.0.1:${port}/
+    RequestHeader set X-Forwarded-Proto "http"
+</VirtualHost>
+APACHE
+  run_root install -m 644 "$tmp" "$conf"
+  rm -f "$tmp"
+  run_root a2ensite omnivex-academy.conf >/dev/null 2>&1 || true
+  if ! run_root apache2ctl -t; then
+    warn "Apache config test failed — our file was removed; existing sites are untouched."
+    run_root rm -f "$conf"
+    run_root a2dissite omnivex-academy.conf >/dev/null 2>&1 || true
+    exit 1
+  fi
+  service_reload apache2
+}
+
+# Existing Caddy on :80 — one site block; Caddy also provisions HTTPS itself.
+setup_caddy() {
+  local domain="$1" port="$2"
+  local conf="/etc/caddy/Caddyfile" tmp
+  say "Caddy owns port 80 — adding ${domain}…"
+  if [ ! -f "$conf" ]; then
+    warn "No ${conf} found — point a Caddy site at http://127.0.0.1:${port} manually."
+    exit 1
+  fi
+  if grep -q "${domain}" "$conf"; then
+    say "Caddy already proxies ${domain} — nothing to change."
+    return 0
+  fi
+  tmp="$(mktemp .caddy.tmp.XXXXXX)"
+  cp "$conf" "$tmp"
+  cat >>"$tmp" <<BLOCK
+
+# --- omnivex-academy (managed by ./deploy.sh proxy) ---
+${domain}, www.${domain} {
+    reverse_proxy 127.0.0.1:${port}
+}
+BLOCK
+  if command -v caddy >/dev/null 2>&1; then
+    if ! run_root caddy validate --config "$tmp" --adapter caddyfile >/dev/null 2>&1; then
+      warn "Caddy config test failed — nothing was changed."
+      rm -f "$tmp"
+      exit 1
+    fi
+  fi
+  run_root install -m 644 "$tmp" "$conf"
+  rm -f "$tmp"
+  service_reload caddy
+}
+
+setup_proxy() {
+  ensure_curl
+  local domain="omnivex-academy.xyz" port
+  port="$(get_env_val PORT)"
+  port="${port:-3000}"
+
+  detect_front
+  case "$front_server" in
+    nginx)
+      say "nginx found — configuring our server block…"
+      setup_nginx_proxy "$domain" "$port"
+      ;;
+    free)
+      say "Port 80 is free — installing nginx…"
+      if command -v apt-get >/dev/null 2>&1; then
+        run_root apt-get update -y >/dev/null 2>&1 || true
+        run_root apt-get install -y nginx >/dev/null
+      elif command -v dnf >/dev/null 2>&1; then
+        run_root dnf install -y nginx >/dev/null
+      elif command -v yum >/dev/null 2>&1; then
+        run_root yum install -y nginx >/dev/null
+      else
+        warn "No supported package manager — install nginx yourself, then re-run ./deploy.sh proxy."
+        exit 1
+      fi
+      front_server="nginx"
+      setup_nginx_proxy "$domain" "$port"
+      ;;
+    apache) setup_apache "$domain" "$port" ;;
+    caddy) setup_caddy "$domain" "$port" ;;
+    *)
+      warn "Port 80 is held by a process this script does not manage (${front_server}):"
+      printf '%s\n' "$port80_line"
+      if command -v docker >/dev/null 2>&1; then
+        docker ps --filter "publish=80" --format '  container: {{.Names}}   image: {{.Image}}' 2>/dev/null || true
+      fi
+      warn "Nothing was changed. Free port 80, or tell me which service that is and"
+      warn "omnivex-academy.xyz will be wired into it."
+      exit 1
+      ;;
+  esac
+
+  # Firewall — applies to every front type.
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
     run_root ufw allow 80/tcp >/dev/null 2>&1 || true
     run_root ufw allow 443/tcp >/dev/null 2>&1 || true
@@ -363,31 +489,44 @@ NGINX
   fi
 
   if curl -fsS --max-time 5 -H "Host: ${domain}" "http://127.0.0.1/api/health" >/dev/null 2>&1; then
-    say "✔ nginx front is live: http://${domain} → 127.0.0.1:${port}"
+    say "✔ ${front_server} front is live: http://${domain} → 127.0.0.1:${port}"
   else
-    warn "nginx is configured, but the app did not answer on 127.0.0.1:${port}."
-    warn "Container down? Check ./deploy.sh status / ./deploy.sh logs, then re-run ./deploy.sh proxy."
+    warn "The proxy is configured, but the app did not answer on 127.0.0.1:${port}."
+    warn "Container down? ./deploy.sh status / ./deploy.sh logs, then re-run ./deploy.sh proxy."
   fi
 }
 
 # ---- Let's Encrypt certificate (Cloudflare Full strict) --------
 do_tls() {
   local email="${1:-}"
+  local front="${2:-nginx}"
   local domain="omnivex-academy.xyz"
+  local plugin="--nginx" pkg="python3-certbot-nginx"
 
-  if ! command -v nginx >/dev/null 2>&1; then
+  if [ "$front" = "caddy" ]; then
+    say "Caddy provisions its own certificate — nothing to request here."
+    return 0
+  fi
+  if [ "$front" = "apache" ]; then
+    plugin="--apache"
+    pkg="python3-certbot-apache"
+    if ! command -v apache2ctl >/dev/null 2>&1; then
+      warn "Apache front expected but apache2ctl is missing — run ./deploy.sh proxy first."
+      return 1
+    fi
+  elif ! command -v nginx >/dev/null 2>&1; then
     warn "nginx is not installed — run ./deploy.sh proxy first."
     return 1
   fi
   if ! command -v certbot >/dev/null 2>&1; then
-    say "Installing certbot + the nginx plugin…"
+    say "Installing certbot + the web-server plugin…"
     if command -v apt-get >/dev/null 2>&1; then
       run_root apt-get update -y >/dev/null 2>&1 || true
-      run_root apt-get install -y certbot python3-certbot-nginx >/dev/null
+      run_root apt-get install -y certbot "$pkg" >/dev/null
     elif command -v dnf >/dev/null 2>&1; then
-      run_root dnf install -y certbot python3-certbot-nginx >/dev/null
+      run_root dnf install -y certbot "$pkg" >/dev/null
     elif command -v yum >/dev/null 2>&1; then
-      run_root yum install -y certbot python3-certbot-nginx >/dev/null
+      run_root yum install -y certbot "$pkg" >/dev/null
     fi
   fi
   if ! command -v certbot >/dev/null 2>&1; then
@@ -404,10 +543,10 @@ do_tls() {
   fi
 
   say "Requesting a certificate for ${domain}…"
-  if ! run_root certbot --nginx -d "$domain" --non-interactive --agree-tos -m "$email" --redirect; then
+  if ! run_root certbot ${plugin} -d "$domain" --non-interactive --agree-tos -m "$email" --redirect; then
     warn "certbot failed. Common causes: DNS not propagated yet, or a Cloudflare WAF/bot rule"
     warn "blocking /.well-known/acme-challenge. Retry later, or run interactively:"
-    warn "  certbot --nginx -d ${domain}"
+    warn "  certbot ${plugin} -d ${domain}"
     return 1
   fi
 
@@ -575,8 +714,16 @@ deploy() {
     cf_hint
   fi
 
-  # ---- 8. HTTPS certificate (Let's Encrypt) -------------------
-  if [ "$cert_ready" = "1" ]; then
+  # ---- 8. HTTPS certificate (per front-end) --------------------
+  if [ "$front_server" = "caddy" ]; then
+    say "Caddy obtains its own certificate — waiting for HTTPS…"
+    if wait_https; then
+      cert_ready=1
+      say "✔ HTTPS is live (certificate managed by Caddy)."
+    else
+      warn "HTTPS not up within 90 s — Caddy will finish on its own; check ./deploy.sh status."
+    fi
+  elif [ "$cert_ready" = "1" ]; then
     say "✔ TLS certificate already installed."
   else
     local le_email
@@ -586,7 +733,7 @@ deploy() {
     fi
     if [ -n "$le_email" ]; then
       say "Requesting the HTTPS certificate…"
-      if do_tls "$le_email"; then
+      if do_tls "$le_email" "$front_server"; then
         cert_ready=1
       else
         warn "Certificate not issued — the site still works over HTTP; retry with ./deploy.sh tls <email>."
@@ -625,9 +772,6 @@ reminders() {
     warn "• PAYSTACK_SECRET_KEY is empty — checkout is disabled. Add it, then ./deploy.sh restart"
   else
     say "• Paystack webhook to register: ${app_url}/api/payments/webhook"
-  fi
-  if [ ! -f /etc/nginx/conf.d/omnivex-academy.conf ] && [ ! -f /etc/nginx/sites-enabled/omnivex-academy ]; then
-    warn "• No nginx front-end yet — if the domain shows Cloudflare error 525, run ./deploy.sh proxy"
   fi
   echo
   say "Helpers: ./deploy.sh logs [-f] | restart | stop | status | backup | proxy | tls | doctor"
@@ -718,6 +862,19 @@ cf_hint() {
 }
 
 has_cert() { run_root test -f /etc/letsencrypt/live/omnivex-academy.xyz/fullchain.pem 2>/dev/null; }
+
+# Poll https://omnivex-academy.xyz from this box (Caddy provisions its own cert).
+wait_https() {
+  local i
+  for i in $(seq 1 30); do
+    if curl -ksS --max-time 5 --resolve "omnivex-academy.xyz:443:127.0.0.1" \
+      "https://omnivex-academy.xyz/api/health" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 3
+  done
+  return 1
+}
 
 segf_count() { dmesg 2>/dev/null | grep -ci 'segfault' || true; }
 
@@ -811,32 +968,6 @@ do_doctor() {
   say "Send the output of sections 3–7 for the fix."
 }
 
-# ---- commands that do not need Docker --------------------------
-case "$CMD" in
-  proxy)
-    require_env
-    setup_proxy
-    cf_init
-    if [ -n "$cf_zone_id" ]; then
-      cf_ensure_dns
-      if has_cert; then cf_set_ssl strict; else cf_set_ssl flexible; fi
-    else
-      cf_hint
-    fi
-    exit 0
-    ;;
-  tls)
-    require_env
-    rc=0
-    do_tls "${2:-}" || rc=1
-    if [ "$rc" = "0" ]; then
-      cf_init
-      if [ -n "$cf_zone_id" ]; then cf_set_ssl strict; else cf_hint; fi
-    fi
-    exit "$rc"
-    ;;
-esac
-
 # ---- 0b. Preflight ---------------------------------------------
 ensure_docker
 ensure_daemon
@@ -863,7 +994,30 @@ case "$CMD" in
     say "✔ stopped"
     ;;
   status) do_status ;;
-  backup) do_backup ;;  doctor)
+  backup) do_backup ;;
+  proxy)
+    require_env
+    setup_proxy
+    cf_init
+    if [ -n "$cf_zone_id" ]; then
+      cf_ensure_dns
+      if has_cert; then cf_set_ssl strict; else cf_set_ssl flexible; fi
+    else
+      cf_hint
+    fi
+    ;;
+  tls)
+    require_env
+    detect_front
+    rc=0
+    do_tls "${2:-}" "$front_server" || rc=1
+    if [ "$rc" = "0" ]; then
+      cf_init
+      if [ -n "$cf_zone_id" ]; then cf_set_ssl strict; else cf_hint; fi
+    fi
+    exit "$rc"
+    ;;
+  doctor)
     mkdir -p backups
     do_doctor 2>&1 | tee "backups/doctor-$(date +%Y%m%d-%H%M%S).log"
     ;;
