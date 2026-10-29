@@ -439,6 +439,93 @@ BLOCK
   service_reload caddy
 }
 
+# Port 80/443 is published by another container (e.g. the sibling app's
+# proxy). Caddy containers get wired automatically (Caddy also provisions
+# the certificate); everything else is reported with full detail.
+setup_docker_proxy() {
+  local domain="$1" port="$2"
+  local c image gw host_conf tmp
+
+  c="$("${DOCKER[@]}" ps --filter publish=80 --format '{{.Names}}' 2>/dev/null | head -1 || true)"
+  if [ -z "$c" ]; then
+    c="$("${DOCKER[@]}" ps --filter publish=443 --format '{{.Names}}' 2>/dev/null | head -1 || true)"
+  fi
+  if [ -z "$c" ]; then
+    warn "No container publishes 80/443 — full report: ./deploy.sh doctor (section 9)."
+    exit 1
+  fi
+  image="$("${DOCKER[@]}" inspect "$c" --format '{{.Config.Image}}' 2>/dev/null || true)"
+  gw="$("${DOCKER[@]}" inspect "$c" --format '{{range .NetworkSettings.Networks}}{{.Gateway}} {{end}}' 2>/dev/null | awk '{print $1}' || true)"
+  say "Ports 80/443 are published by container '${c}' (image: ${image})."
+
+  case "$image" in
+    *caddy*)
+      host_conf="$("${DOCKER[@]}" inspect "$c" --format '{{range .Mounts}}{{if eq .Destination "/etc/caddy/Caddyfile"}}{{.Source}}{{end}}{{end}}' 2>/dev/null || true)"
+      if [ -z "$host_conf" ]; then
+        host_conf="$("${DOCKER[@]}" inspect "$c" --format '{{range .Mounts}}{{if eq .Destination "/etc/caddy"}}{{.Source}}{{end}}{{end}}' 2>/dev/null || true)"
+        host_conf="${host_conf:+${host_conf}/Caddyfile}"
+      fi
+      if [ -z "$host_conf" ] || [ ! -f "$host_conf" ]; then
+        warn "Caddy container found, but its Caddyfile is not a mounted file — cannot edit it safely."
+        warn "Mounts of ${c}:"
+        "${DOCKER[@]}" inspect "$c" --format '{{range .Mounts}}  {{.Source}} -> {{.Destination}}{{println}}{{end}}' 2>/dev/null || true
+        exit 1
+      fi
+      if grep -q "${domain}" "$host_conf"; then
+        say "Caddy already proxies ${domain} — nothing to change."
+        front_server="docker-caddy"
+        return 0
+      fi
+      tmp="$(mktemp .caddy.tmp.XXXXXX)"
+      cp "$host_conf" "$tmp"
+      cat >>"$tmp" <<BLOCK
+
+# --- omnivex-academy (managed by ./deploy.sh proxy) ---
+${domain}, www.${domain} {
+    reverse_proxy ${gw}:${port}
+}
+BLOCK
+      cp "$host_conf" "${host_conf}.deploy-backup"
+      run_root install -m 644 "$tmp" "$host_conf"
+      rm -f "$tmp"
+      if ! "${DOCKER[@]}" exec "$c" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
+        run_root cp "${host_conf}.deploy-backup" "$host_conf"
+        run_root rm -f "${host_conf}.deploy-backup"
+        warn "Caddy config test failed — rolled back, nothing was changed."
+        exit 1
+      fi
+      run_root rm -f "${host_conf}.deploy-backup"
+      if ! "${DOCKER[@]}" exec "$c" caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile; then
+        warn "Caddy reload failed — config was written; check: docker logs ${c}"
+        exit 1
+      fi
+      say "✔ ${domain} added to the Caddy container (it provisions HTTPS itself)."
+      front_server="docker-caddy"
+      ;;
+    *nginx*)
+      host_conf="$("${DOCKER[@]}" inspect "$c" --format '{{range .Mounts}}{{if eq .Destination "/etc/nginx"}}{{.Source}}{{end}}{{end}}' 2>/dev/null || true)"
+      warn "The proxy is an nginx container (${c}). Its TLS certificate for"
+      warn "${domain} must exist before the domain can be wired in:"
+      if [ -n "$host_conf" ]; then
+        warn "  • its /etc/nginx is mounted at ${host_conf} (edits are persistent)"
+        warn "  • grant the Cloudflare token 'Origin CA Keys: Edit' and rerun — the"
+        warn "    origin certificate is then created and installed automatically"
+      else
+        warn "  • its /etc/nginx is NOT mounted, so config edits would not survive a restart"
+      fi
+      warn "Mounts of ${c}:"
+      "${DOCKER[@]}" inspect "$c" --format '{{range .Mounts}}  {{.Source}} -> {{.Destination}}{{println}}{{end}}' 2>/dev/null || true
+      exit 1
+      ;;
+    *)
+      warn "Container '${c}' runs image '${image}' — not auto-wirable yet. Mounts:"
+      "${DOCKER[@]}" inspect "$c" --format '{{range .Mounts}}  {{.Source}} -> {{.Destination}}{{println}}{{end}}' 2>/dev/null || true
+      warn "Tell me which proxy it is (Caddy can be wired in one command)."
+      exit 1
+      ;;
+  esac
+}
+
 setup_proxy() {
   ensure_curl
   local domain="omnivex-academy.xyz" port
@@ -469,6 +556,7 @@ setup_proxy() {
       ;;
     apache) setup_apache "$domain" "$port" ;;
     caddy) setup_caddy "$domain" "$port" ;;
+    docker | nginx-container) setup_docker_proxy "$domain" "$port" ;;
     *)
       warn "Port 80 is held by a process this script does not manage (${front_server}):"
       printf '%s\n' "$port80_line"
@@ -718,33 +806,38 @@ deploy() {
   setup_proxy
 
   # ---- 8. HTTPS certificate (per front-end) --------------------
-  if [ "$front_server" = "caddy" ]; then
-    say "Caddy obtains its own certificate — waiting for HTTPS…"
+  case "$front_server" in
+    caddy | docker-caddy)
+      say "Caddy obtains its own certificate — waiting for HTTPS…"
     if wait_https; then
       cert_ready=1
       say "✔ HTTPS is live (certificate managed by Caddy)."
     else
       warn "HTTPS not up within 90 s — Caddy will finish on its own; check ./deploy.sh status."
     fi
-  elif [ "$cert_ready" = "1" ]; then
-    say "✔ TLS certificate already installed."
-  else
-    local le_email
-    le_email="$(get_env_val LETSENCRYPT_EMAIL)"
-    if [ -z "$le_email" ] && [ -t 0 ]; then
-      read -r -p "Email for Let's Encrypt: " le_email || true
-    fi
-    if [ -n "$le_email" ]; then
-      say "Requesting the HTTPS certificate…"
-      if do_tls "$le_email" "$front_server"; then
-        cert_ready=1
-      else
-        warn "Certificate not issued — the site still works over HTTP; retry with ./deploy.sh tls <email>."
-      fi
+    ;;
+  *)
+    if [ "$cert_ready" = "1" ]; then
+      say "✔ TLS certificate already installed."
     else
-      warn "No Let's Encrypt email — no certificate yet (./deploy.sh tls you@example.com)."
+      local le_email
+      le_email="$(get_env_val LETSENCRYPT_EMAIL)"
+      if [ -z "$le_email" ] && [ -t 0 ]; then
+        read -r -p "Email for Let's Encrypt: " le_email || true
+      fi
+      if [ -n "$le_email" ]; then
+        say "Requesting the HTTPS certificate…"
+        if do_tls "$le_email" "$front_server"; then
+          cert_ready=1
+        else
+          warn "Certificate not issued — the site still works over HTTP; retry with ./deploy.sh tls <email>."
+        fi
+      else
+        warn "No Let's Encrypt email — no certificate yet (./deploy.sh tls you@example.com)."
+      fi
     fi
-  fi
+    ;;
+  esac
   if [ "$cert_ready" = "1" ] && [ -n "$cf_zone_id" ]; then
     say "Cloudflare stays on Full — safe for every domain on this zone."
   fi
