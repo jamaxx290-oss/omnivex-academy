@@ -24,10 +24,12 @@
 #   ./deploy.sh         (this script does ALL of the above)
 #
 # Helpers:
-#   ./deploy.sh logs      tail the app logs
+#   ./deploy.sh logs      show the last 200 app log lines (-f to follow)
 #   ./deploy.sh restart   recreate the container (applies .env changes)
 #   ./deploy.sh stop      stop the container
 #   ./deploy.sh status    show container status + health
+#   ./deploy.sh doctor    one-shot crash report (state, logs, boot test,
+#                         native-module test, kernel segfaults, memory)
 #   ./deploy.sh backup    snapshot the database + uploads into ./backups
 #   ./deploy.sh proxy     install/configure nginx in front of the app (port 80)
 #   ./deploy.sh tls       get a Let's Encrypt certificate via certbot (443)
@@ -48,13 +50,14 @@ Usage: ./deploy.sh [command]
 Commands:
   (none)    everything: prerequisites → build → start → nginx → Cloudflare
             DNS/SSL mode → HTTPS certificate → summary
-  logs      follow the app logs (Ctrl-C to stop)
+  logs [-f]  show the last 200 app log lines (-f follows live output)
   restart   recreate the container (applies .env changes)
   stop      stop the container
   status    show container status + health
   backup    snapshot database + uploads into ./backups
   proxy     nginx in front of the app (fixes Cloudflare error 525)
   tls EMAIL get a Let's Encrypt certificate on 443 (Cloudflare Full strict)
+  doctor    one-shot crash report — run this when the app is down
   help      show this help
 EOF
 }
@@ -65,7 +68,7 @@ case "${CMD}" in
     usage
     exit 0
     ;;
-  logs | restart | stop | status | backup | proxy | tls) ;;
+  logs | restart | stop | status | backup | proxy | tls | doctor) ;;
   *)
     usage >&2
     exit 1
@@ -627,7 +630,7 @@ reminders() {
     warn "• No nginx front-end yet — if the domain shows Cloudflare error 525, run ./deploy.sh proxy"
   fi
   echo
-  say "Helpers: ./deploy.sh logs | restart | stop | status | backup | proxy | tls"
+  say "Helpers: ./deploy.sh logs [-f] | restart | stop | status | backup | proxy | tls | doctor"
 }
 
 # ---- Cloudflare (automated when CLOUDFLARE_API_TOKEN is set) ----
@@ -716,6 +719,75 @@ cf_hint() {
 
 has_cert() { run_root test -f /etc/letsencrypt/live/omnivex-academy.xyz/fullchain.pem 2>/dev/null; }
 
+# ---- one-shot crash report -------------------------------------
+do_doctor() {
+  require_env
+  local brc=0
+
+  say "== 1. container state (exit / OOM / restarts / log driver) =="
+  "${COMPOSE[@]}" ps -a || true
+  "${DOCKER[@]}" inspect omnivex --format \
+    'state={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}} restarts={{.RestartCount}} started={{.State.StartedAt}} logdriver={{.HostConfig.LogConfig.Type}}' \
+    2>/dev/null || true
+  echo
+
+  say "== 2. container logs (empty = died before printing anything) =="
+  "${COMPOSE[@]}" logs --tail 60 omnivex 2>&1 | tail -60 || true
+  echo
+
+  say "== 3. direct boot of the app (30 s cap, shows any error + exit code) =="
+  timeout 30 "${COMPOSE[@]}" run -T --rm --entrypoint "" omnivex \
+    node --max-old-space-size=384 --import tsx src/server/index.ts || brc=$?
+  case "$brc" in
+    0) say "✔ the app started cleanly when run directly" ;;
+    124) say "✔ still running after 30 s → the app boots; the container path is the problem" ;;
+    *) warn "direct boot exit code: ${brc}  (139 = segmentation fault)" ;;
+  esac
+  echo
+
+  say "== 4. native module test (better-sqlite3) =="
+  if "${COMPOSE[@]}" run -T --rm --entrypoint "" omnivex \
+    node --input-type=commonjs -e \
+    "const D=require('better-sqlite3'); new D(':memory:'); console.log('sqlite native OK');"; then
+    say "✔ better-sqlite3 loads and queries"
+  else
+    warn "✗ better-sqlite3 itself is broken in this image (rebuild with: docker compose build --no-cache)"
+  fi
+  echo
+
+  say "== 5. tsx loader test (the --import tsx boot path) =="
+  if "${COMPOSE[@]}" run -T --rm --entrypoint "" omnivex \
+    node --import tsx -e "console.log('tsx loader OK')"; then
+    say "✔ tsx loader works"
+  else
+    warn "✗ tsx loader crashes — the boot command is the problem, not the app"
+  fi
+  echo
+
+  say "== 6. container command + environment =="
+  "${DOCKER[@]}" inspect omnivex --format 'cmd={{.Config.Cmd}}{{println}}entrypoint={{.Config.Entrypoint}}' 2>/dev/null || true
+  "${COMPOSE[@]}" run -T --rm --entrypoint "" omnivex \
+    node -p 'process.version + " " + process.arch' 2>&1 | tail -3 || true
+  "${COMPOSE[@]}" run -T --rm --entrypoint "" omnivex \
+    sh -c 'ls -lan /app/data | head -5' 2>&1 | tail -6 || true
+  echo
+
+  say "== 7. kernel segfault / OOM records =="
+  if dmesg 2>/dev/null | grep -iE 'segfault|oom-kill' | tail -10; then
+    :
+  else
+    warn "(no segfault records readable — dmesg restricted or none recorded)"
+  fi
+  echo
+
+  say "== 8. host memory / swap =="
+  free -h || true
+  swapon --show || true
+
+  echo
+  say "Send the output of sections 3–7 for the fix."
+}
+
 # ---- commands that do not need Docker --------------------------
 case "$CMD" in
   proxy)
@@ -751,7 +823,10 @@ case "$CMD" in
   "") deploy ;;
   logs)
     require_env
-    exec "${COMPOSE[@]}" logs -f --tail=200
+    if [ "${2:-}" = "-f" ] || [ "${2:-}" = "--follow" ]; then
+      exec "${COMPOSE[@]}" logs -f --tail 200
+    fi
+    "${COMPOSE[@]}" logs --tail 200
     ;;
   restart)
     require_env
@@ -766,4 +841,5 @@ case "$CMD" in
     ;;
   status) do_status ;;
   backup) do_backup ;;
+  doctor) do_doctor ;;
 esac

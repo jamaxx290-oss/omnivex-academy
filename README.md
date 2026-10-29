@@ -66,9 +66,14 @@ git pull && ./deploy.sh
 - finishes by listing any keys you still need to add and the webhook URLs to
   register.
 
-Helper subcommands: `./deploy.sh logs | restart | stop | status | backup | proxy | tls`
-(`restart` recreates the container so `.env` edits take effect; `backup` writes
-a `VACUUM INTO` database snapshot plus an uploads tarball to `./backups/`).
+Helper subcommands: `./deploy.sh logs [-f] | restart | stop | status | backup | proxy | tls | doctor`
+(`logs` prints the last 200 lines and returns — add `-f` to follow; `restart`
+recreates the container so `.env` edits take effect; `backup` writes a
+`VACUUM INTO` database snapshot plus an uploads tarball to `./backups/`;
+`doctor` is the one-shot crash report: container state, logs, a 30-second
+direct boot of the app with its exit code, native-module and tsx-loader
+tests, kernel segfault records and memory/swap — run it whenever the app is
+down and send the output).
 
 **Domain + HTTPS (Cloudflare):** handled by the plain `./deploy.sh` run —
 you only intervene if it prints a manual step. Error 525 means Cloudflare
