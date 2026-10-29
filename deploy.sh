@@ -719,6 +719,8 @@ cf_hint() {
 
 has_cert() { run_root test -f /etc/letsencrypt/live/omnivex-academy.xyz/fullchain.pem 2>/dev/null; }
 
+segf_count() { dmesg 2>/dev/null | grep -ci 'segfault' || true; }
+
 # ---- one-shot crash report -------------------------------------
 do_doctor() {
   require_env
@@ -735,32 +737,53 @@ do_doctor() {
   "${COMPOSE[@]}" logs --tail 60 omnivex 2>&1 | tail -60 || true
   echo
 
-  say "== 3. direct boot of the app (30 s cap, shows any error + exit code) =="
+  say "== 3. direct boot of the app (30 s cap, output + exit code) =="
+  local s0 s1 out
+  s0="$(segf_count)"
+  brc=0
   timeout 30 "${COMPOSE[@]}" run -T --rm --entrypoint "" omnivex \
-    node --max-old-space-size=384 --import tsx src/server/index.ts || brc=$?
+    node --max-old-space-size=384 --import tsx src/server/index.ts \
+    >/tmp/omnivex-doctor-boot.log 2>&1 || brc=$?
+  s1="$(segf_count)"
+  tail -25 /tmp/omnivex-doctor-boot.log
   case "$brc" in
-    0) say "✔ the app started cleanly when run directly" ;;
-    124) say "✔ still running after 30 s → the app boots; the container path is the problem" ;;
-    *) warn "direct boot exit code: ${brc}  (139 = segmentation fault)" ;;
+    0) say "exit code 0 — the app started cleanly when run directly" ;;
+    124) say "still running after 30 s — log above shows how far boot got" ;;
+    *) warn "exit code: ${brc}  (139 = segmentation fault)" ;;
   esac
+  warn "new kernel segfaults during this test: $((s1 - s0))"
   echo
 
   say "== 4. native module test (better-sqlite3) =="
-  if "${COMPOSE[@]}" run -T --rm --entrypoint "" omnivex \
+  s0="$(segf_count)"
+  brc=0
+  out="$("${COMPOSE[@]}" run -T --rm --entrypoint "" omnivex \
     node --input-type=commonjs -e \
-    "const D=require('better-sqlite3'); new D(':memory:'); console.log('sqlite native OK');"; then
+    "const D=require('better-sqlite3'); const d=new D(':memory:'); d.exec('create table t(a)'); console.log('sqlite native OK');" 2>&1)" || brc=$?
+  s1="$(segf_count)"
+  printf '%s\n' "$out" | tail -15
+  if [ "$brc" = "0" ]; then
     say "✔ better-sqlite3 loads and queries"
   else
-    warn "✗ better-sqlite3 itself is broken in this image (rebuild with: docker compose build --no-cache)"
+    warn "✗ better-sqlite3 failed — exit code ${brc} (139 = segfault)"
   fi
+  warn "new kernel segfaults during this test: $((s1 - s0))"
+  echo
+
+  say "== 4b. which better-sqlite3 artifact is baked into the image =="
+  "${COMPOSE[@]}" run -T --rm --entrypoint "" omnivex sh -c \
+    'node -p process.version; ls -la /app/node_modules/better-sqlite3/build/Release/ 2>/dev/null; ls -la /app/node_modules/better-sqlite3/prebuilds/ 2>/dev/null' 2>&1 | tail -14 || true
   echo
 
   say "== 5. tsx loader test (the --import tsx boot path) =="
-  if "${COMPOSE[@]}" run -T --rm --entrypoint "" omnivex \
-    node --import tsx -e "console.log('tsx loader OK')"; then
+  brc=0
+  out="$("${COMPOSE[@]}" run -T --rm --entrypoint "" omnivex \
+    node --import tsx -e "console.log('tsx loader OK')" 2>&1)" || brc=$?
+  printf '%s\n' "$out" | tail -8
+  if [ "$brc" = "0" ]; then
     say "✔ tsx loader works"
   else
-    warn "✗ tsx loader crashes — the boot command is the problem, not the app"
+    warn "✗ tsx loader failed — exit code ${brc}"
   fi
   echo
 
@@ -840,6 +863,8 @@ case "$CMD" in
     say "✔ stopped"
     ;;
   status) do_status ;;
-  backup) do_backup ;;
-  doctor) do_doctor ;;
+  backup) do_backup ;;  doctor)
+    mkdir -p backups
+    do_doctor 2>&1 | tee "backups/doctor-$(date +%Y%m%d-%H%M%S).log"
+    ;;
 esac

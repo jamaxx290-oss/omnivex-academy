@@ -9,7 +9,10 @@
 # ============================================================
 
 # ---- Stage 1: dependencies -------------------------------------
-FROM node:20-slim AS deps
+# Node 22 is required: better-sqlite3 v13 declares engines node>=22 and its
+# prebuilt binaries are built against the Node 22+ ABI — on Node 20 the addon
+# segfaults the process at load (exit 139, no output).
+FROM node:22-slim AS deps
 WORKDIR /app
 # better-sqlite3 is a native module: when a prebuilt binary is not available
 # npm falls back to node-gyp, which needs a toolchain that slim images omit.
@@ -28,7 +31,7 @@ COPY . .
 RUN NODE_OPTIONS=--max-old-space-size=608 npm run build
 
 # ---- Stage 3: runtime ------------------------------------------
-FROM node:20-slim AS runtime
+FROM node:22-slim AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 
