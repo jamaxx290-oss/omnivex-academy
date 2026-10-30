@@ -19,7 +19,8 @@ type PayStatus = {
 };
 
 const perks = [
-  "Unlimited access to every mentorship group",
+  "Unlimited access to everything Omnivex Academy offers",
+  "High-priority premium KDP mentorship",
   "Direct messages with mentors and peers",
   "Voice notes, images, and video in every chat",
   "Announcements and launch reviews as they happen",
@@ -194,8 +195,8 @@ export default function PaywallPage() {
                 Unlock the full academy
               </h1>
               <p className="mt-2 text-sm leading-relaxed text-mist">
-                One payment. Every room, every mentor, every announcement — no
-                subscriptions, no tiers.
+                One payment. Every room, every mentor, every announcement — plus
+                high-priority premium KDP mentorship. No subscriptions, no tiers.
               </p>
 
               <div className="mt-6 flex items-end gap-2">
@@ -268,21 +269,52 @@ export default function PaywallPage() {
             {/* History / info */}
             <aside className="space-y-4 md:col-span-2">
               <div className="card rounded-2xl p-5">
-                <h2 className="text-sm font-semibold">What happens next</h2>
-                <ol className="mt-3 space-y-3 text-xs leading-relaxed text-mist">
-                  <li>
-                    <span className="font-semibold text-white">1.</span> Pay securely in
-                    naira on Paystack's checkout.
+                <h2 className="text-sm font-semibold">What you get</h2>
+                <ul className="mt-3 space-y-3 text-xs leading-relaxed text-mist">
+                  <li className="flex items-start gap-2">
+                    <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[11px] text-white">
+                      ✓
+                    </span>
+                    <span>Unlimited access to all mentorship groups, calls, and
+                    academy content.</span>
                   </li>
-                  <li>
-                    <span className="font-semibold text-white">2.</span> You're redirected
-                    back — we verify the transaction server-side.
+                  <li className="flex items-start gap-2">
+                    <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[11px] text-white">
+                      ✓
+                    </span>
+                    <span>High-priority premium KDP mentorship — direct access to
+                    advanced publishing guidance when you need it.</span>
                   </li>
-                  <li>
-                    <span className="font-semibold text-white">3.</span> Membership
-                    activates instantly and the rooms open.
+                  <li className="flex items-start gap-2">
+                    <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[11px] text-white">
+                      ✓
+                    </span>
+                    <span>Direct messages with mentors and peers.</span>
                   </li>
-                </ol>
+                  <li className="flex items-start gap-2">
+                    <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent-soft text-[11px] text-white">
+                      ✓
+                    </span>
+                    <span>Announcements and launch reviews as they happen.</span>
+                  </li>
+                </ul>
+              </div>
+
+              <div className="card rounded-2xl p-5">
+                {user && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      api("/api/auth/sign-out", { method: "POST" }).finally(() => {
+                        window.location.href = "/";
+                      });
+                    }}
+                    className="focus-ring w-full rounded-xl border border-danger/40 py-3 text-sm font-semibold text-danger transition hover:bg-danger/10"
+                  >
+                    Sign out
+                  </button>
+                )
+                }
               </div>
 
               <div className="card rounded-2xl p-5">
