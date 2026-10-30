@@ -66,7 +66,7 @@ git pull && ./deploy.sh
 - finishes by listing any keys you still need to add and the webhook URLs to
   register.
 
-Helper subcommands: `./deploy.sh logs [-f] | restart | stop | status | backup | proxy | tls | doctor`
+Helper subcommands: `./deploy.sh logs [-f] | restart | stop | status | backup | proxy | worker | tls | doctor`
 (`logs` prints the last 200 lines and returns — add `-f` to follow; `restart`
 recreates the container so `.env` edits take effect; `backup` writes a
 `VACUUM INTO` database snapshot plus an uploads tarball to `./backups/`;
@@ -84,12 +84,39 @@ a reload. Caddy fronts get HTTPS automatically (no certbot); nginx/Apache
 get a Let's Encrypt certificate via certbot. The zone's SSL mode is kept on
 **Full** — `deploy.sh` deliberately never sets Flexible, because Flexible is
 zone-wide and breaks any sibling domain (another app on
-`*.omnivex-academy.xyz`) that redirects http → https. Error 525 means Cloudflare
-reached the VPS but no origin answered the TLS handshake; `./deploy.sh proxy`
-runs just that step on its own, and `./deploy.sh tls you@example.com` runs
-just the certificate. With `CLOUDFLARE_API_TOKEN` in `.env` there is nothing
-to click in the dashboard at all: the DNS record is created/proxied and the
-SSL mode flips from Flexible to Full (strict) automatically.
+`*.omnivex-academy.xyz`) that redirects http → https. With
+`CLOUDFLARE_API_TOKEN` in `.env` there is nothing to click in the dashboard:
+the proxied A record is created and the mode is set to Full automatically.
+
+**Cloudflare Worker front:** when port 80/443 is held by a service the script
+must not touch (unknown process, an nginx container without a writable
+config), it falls back to a Worker instead of giving up: an origin port used
+only by this app's container is published (default 8443, `WORKER_ORIGIN_PORT`,
+via a generated `docker-compose.override.yml`), a Worker script proxying HTTP
+**and WebSockets** is uploaded, and the route `omnivex-academy.xyz/*` (plus
+`www`) is attached. TLS terminates at Cloudflare's edge — no origin
+certificate, no certbot, and the zone mode, sibling domains and the other
+container are untouched. `PROXY_MODE=worker` in `.env` forces this path. The
+token additionally needs Account Settings (Read), Workers Scripts (Edit) and
+Workers Routes (Edit); with ufw active, the origin port is restricted to
+Cloudflare's published IP ranges.
+
+**One-time Worker setup:** when the token in `.env` already has every
+permission, the whole front is a single command:
+
+```bash
+./deploy.sh worker
+```
+
+It resolves the zone, makes sure the proxied A record exists, publishes the
+origin port, uploads the Worker, attaches the `omnivex-academy.xyz/*` (+ `www`)
+routes, keeps the zone on Full and verifies `https://omnivex-academy.xyz/api/health`
+through the edge. Every step is idempotent, so re-running it later just
+re-applies the same state — nothing in the dashboard is ever clicked by hand.
+
+Error 525 means Cloudflare reached the VPS but no origin answered the TLS
+handshake — run `./deploy.sh` (or `./deploy.sh proxy` for just that step);
+`./deploy.sh tls you@example.com` runs only the certificate.
 
 What the container gives you:
 

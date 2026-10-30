@@ -17,6 +17,9 @@
 #   * puts the web server already on port 80 in front of the app
 #     (nginx / Apache / Caddy are all recognized and wired up; nginx is
 #     installed only when port 80 is free)
+#   * when port 80/443 is held by a service it may not touch, falls back to
+#     a Cloudflare Worker front (edge TLS → a port published only by this
+#     app's container); force it with PROXY_MODE=worker in .env
 #   * points Cloudflare at the server (DNS record, proxied) and sets the
 #     SSL mode automatically when CLOUDFLARE_API_TOKEN is in .env
 #   * gets a Let's Encrypt certificate on 443 (certbot) for Full (strict)
@@ -34,6 +37,9 @@
 #                         native-module test, kernel segfaults, memory)
 #   ./deploy.sh backup    snapshot the database + uploads into ./backups
 #   ./deploy.sh proxy     install/configure nginx in front of the app (port 80)
+#   ./deploy.sh worker    ONE-TIME Cloudflare Worker front, driven entirely by
+#                         the token in .env: origin port + Worker + routes +
+#                         DNS + SSL mode (idempotent — safe to re-run)
 #   ./deploy.sh tls       get a Let's Encrypt certificate via certbot (443)
 #   ./deploy.sh help      show usage
 # =============================================================
@@ -57,7 +63,12 @@ Commands:
   stop      stop the container
   status    show container status + health
   backup    snapshot database + uploads into ./backups
-  proxy     reverse proxy in front of the app (fixes Cloudflare error 525)
+  proxy     reverse proxy in front of the app (fixes Cloudflare error 525);
+            falls back to a Cloudflare Worker when port 80/443 is blocked
+  worker    ONE-TIME Cloudflare Worker front: publishes this app's origin port,
+            uploads the Worker, attaches the routes, creates the DNS record and
+            keeps the zone on Full — everything from CLOUDFLARE_API_TOKEN in
+            .env, no dashboard clicks; re-running only re-applies the same state
   tls EMAIL get a Let's Encrypt certificate on 443 (Cloudflare Full strict)
   doctor    one-shot crash report — run this when the app is down
   help      show this help
@@ -70,7 +81,7 @@ case "${CMD}" in
     usage
     exit 0
     ;;
-  logs | restart | stop | status | backup | proxy | tls | doctor) ;;
+  logs | restart | stop | status | backup | proxy | tls | worker | doctor) ;;
   *)
     usage >&2
     exit 1
@@ -439,6 +450,178 @@ BLOCK
   service_reload caddy
 }
 
+# ---- Cloudflare Worker front (edge → this server) -------------
+# Used when the existing port-80/443 service cannot be wired safely, or
+# with PROXY_MODE=worker. The Worker terminates TLS at Cloudflare's edge
+# (zone mode and other domains untouched) and proxies to a public origin
+# port published only by this app's container.
+cf_account_id=""
+
+cf_account() {
+  local resp
+  if [ -n "$cf_account_id" ]; then return 0; fi
+  resp="$(cf_call GET "/accounts" || true)"
+  if ! cf_ok "$resp"; then return 1; fi
+  cf_account_id="$(printf '%s' "$resp" | grep -o '"id":"[a-f0-9]\{32\}"' | head -1 | cut -d'"' -f4 || true)"
+  [ -n "$cf_account_id" ]
+}
+
+render_worker_js() {
+  local out="$1" ip="$2" wport="$3"
+  cat >"$out" <<WORKER
+// Managed by ./deploy.sh proxy — Cloudflare Worker front for omnivex-academy.xyz
+const ORIGIN = "http://${ip}:${wport}";
+
+export default {
+  async fetch(request) {
+    const src = new URL(request.url);
+    const target = new URL(ORIGIN + src.pathname + src.search);
+
+    // WebSocket (live chat / calls): bridge client ⇄ origin explicitly.
+    const upgrade = (request.headers.get("Upgrade") || "").toLowerCase();
+    if (upgrade === "websocket") {
+      const up = await fetch(target.href, { headers: request.headers });
+      const upWS = up.webSocket;
+      if (!upWS) return new Response("origin refused the websocket", { status: 502 });
+      upWS.accept();
+      const pair = new WebSocketPair();
+      const client = pair[0];
+      const server = pair[1];
+      server.accept();
+      const pipe = (a, b) => {
+        a.addEventListener("message", (e) => { try { b.send(e.data); } catch (_) {} });
+        a.addEventListener("close", (e) => { try { b.close(e.code, e.reason); } catch (_) {} });
+      };
+      pipe(server, upWS);
+      pipe(upWS, server);
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
+    // Plain HTTP: transparent pass-through (stream bodies, manual redirects).
+    const headers = new Headers(request.headers);
+    headers.delete("Accept-Encoding");
+    const init = { method: request.method, headers, redirect: "manual" };
+    if (request.method !== "GET" && request.method !== "HEAD") init.body = request.body;
+    return fetch(target.href, init);
+  },
+};
+WORKER
+}
+
+cf_upload_worker() {
+  local js="$1" resp
+  resp="$(curl -sS --max-time 30 -X PUT \
+    "${CF_API}/accounts/${cf_account_id}/workers/scripts/omnivex-academy-proxy" \
+    -H "Authorization: Bearer ${cf_token}" \
+    -F 'metadata={"main_module":"worker.js","compatibility_date":"2025-01-01"};type=application/json' \
+    -F "worker.js=@${js};type=application/javascript" || true)"
+  cf_ok "$resp"
+}
+
+cf_ensure_route() {
+  local pattern="$1" resp rid
+  resp="$(cf_call GET "/zones/${cf_zone_id}/workers/routes" || true)"
+  if ! cf_ok "$resp"; then return 1; fi
+  rid="$(printf '%s' "$resp" | grep -o '{[^{}]*}' | grep -F "\"pattern\":\"${pattern}\"" \
+    | grep -o '"id":"[a-f0-9]\{32\}"' | head -1 | cut -d'"' -f4 || true)"
+  if [ -n "$rid" ]; then
+    resp="$(cf_call PUT "/zones/${cf_zone_id}/workers/routes/${rid}" \
+      "{\"pattern\":\"${pattern}\",\"script\":\"omnivex-academy-proxy\"}" || true)"
+  else
+    resp="$(cf_call POST "/zones/${cf_zone_id}/workers/routes" \
+      "{\"pattern\":\"${pattern}\",\"script\":\"omnivex-academy-proxy\"}" || true)"
+  fi
+  cf_ok "$resp"
+}
+
+setup_worker() {
+  local domain="omnivex-academy.xyz" port wport ip js
+  local i healthy=0 ok=0 r
+  port="$(get_env_val PORT)"; port="${port:-3000}"
+  wport="$(get_env_val WORKER_ORIGIN_PORT)"; wport="${wport:-8443}"
+
+  say "Cloudflare Worker mode: edge → this server on port ${wport}."
+
+  if [ -z "$cf_zone_id" ]; then cf_init; fi
+  if [ -z "$cf_zone_id" ]; then
+    warn "Worker mode needs a usable Cloudflare token (Zone.DNS + Zone.SSL + Workers)."
+    return 1
+  fi
+  if ! cf_account; then
+    warn "Cannot list Cloudflare accounts. Add to CLOUDFLARE_API_TOKEN:"
+    warn "  Account Settings: Read, Workers Scripts: Edit (Account), Workers Routes: Edit (Zone)."
+    return 1
+  fi
+
+  # 1. Publish the origin port (override file keeps the repo compose file clean).
+  cat >docker-compose.override.yml <<OVERRIDE
+# Managed by ./deploy.sh proxy (Cloudflare Worker mode) — do not edit.
+services:
+  omnivex:
+    ports:
+      - "${wport}:3000"
+OVERRIDE
+  say "Publishing the origin on port ${wport}…"
+  "${COMPOSE[@]}" up -d
+
+  # 2. Container was recreated — re-check health.
+  for i in $(seq 1 20); do
+    if curl -fsS --max-time 4 "http://127.0.0.1:${port}/api/health" >/dev/null 2>&1; then healthy=1; break; fi
+    sleep 3
+  done
+  if [ "$healthy" != "1" ]; then
+    warn "App not healthy after publishing port ${wport} — ./deploy.sh logs"
+    return 1
+  fi
+
+  # 3. Generate + upload the Worker.
+  ip="$(curl -4 -sS --max-time 10 https://api.ipify.org 2>/dev/null || true)"
+  if [ -z "$ip" ]; then
+    warn "Could not detect this server's public IP for the Worker origin."
+    return 1
+  fi
+  js="$(mktemp .worker.XXXXXX.js)"
+  render_worker_js "$js" "$ip" "$wport"
+  if ! cf_upload_worker "$js"; then
+    rm -f "$js"
+    warn "Worker upload failed — add to CLOUDFLARE_API_TOKEN: Workers Scripts: Edit (Account)."
+    return 1
+  fi
+  rm -f "$js"
+  say "✔ Worker script uploaded (omnivex-academy-proxy)."
+
+  # 4. Routes: only the apex (+www) — the sibling subdomain is untouched.
+  if ! cf_ensure_route "${domain}/*"; then
+    warn "Route attach failed — add to CLOUDFLARE_API_TOKEN: Workers Routes: Edit (Zone ${domain})."
+    return 1
+  fi
+  cf_ensure_route "www.${domain}/*" || true
+  say "✔ Route ${domain}/* → omnivex-academy-proxy"
+
+  # 5. Best effort: only Cloudflare may reach the origin port (when ufw is on).
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
+    for r in $(curl -fsS --max-time 10 https://www.cloudflare.com/ips-v4 2>/dev/null || true) \
+      $(curl -fsS --max-time 10 https://www.cloudflare.com/ips-v6 2>/dev/null || true); do
+      run_root ufw allow from "$r" to any port "$wport" proto tcp >/dev/null 2>&1 || true
+    done
+    say "ufw: origin port ${wport} limited to Cloudflare address ranges."
+  fi
+
+  # 6. End-to-end check through the edge.
+  say "Verifying https://${domain} through the Worker…"
+  for i in $(seq 1 20); do
+    if curl -fsS --max-time 8 "https://${domain}/api/health" >/dev/null 2>&1; then ok=1; break; fi
+    sleep 3
+  done
+  if [ "$ok" = "1" ]; then
+    say "✔ https://${domain} answers through the Cloudflare Worker."
+  else
+    warn "Edge check has not passed yet (DNS may still be propagating) — ./deploy.sh status later."
+  fi
+  front_server="worker"
+  return 0
+}
+
 # Port 80/443 is published by another container (e.g. the sibling app's
 # proxy). Caddy containers get wired automatically (Caddy also provisions
 # the certificate); everything else is reported with full detail.
@@ -452,7 +635,7 @@ setup_docker_proxy() {
   fi
   if [ -z "$c" ]; then
     warn "No container publishes 80/443 — full report: ./deploy.sh doctor (section 9)."
-    exit 1
+    return 1
   fi
   image="$("${DOCKER[@]}" inspect "$c" --format '{{.Config.Image}}' 2>/dev/null || true)"
   gw="$("${DOCKER[@]}" inspect "$c" --format '{{range .NetworkSettings.Networks}}{{.Gateway}} {{end}}' 2>/dev/null | awk '{print $1}' || true)"
@@ -469,7 +652,7 @@ setup_docker_proxy() {
         warn "Caddy container found, but its Caddyfile is not a mounted file — cannot edit it safely."
         warn "Mounts of ${c}:"
         "${DOCKER[@]}" inspect "$c" --format '{{range .Mounts}}  {{.Source}} -> {{.Destination}}{{println}}{{end}}' 2>/dev/null || true
-        exit 1
+        return 1
       fi
       if grep -q "${domain}" "$host_conf"; then
         say "Caddy already proxies ${domain} — nothing to change."
@@ -492,12 +675,12 @@ BLOCK
         run_root cp "${host_conf}.deploy-backup" "$host_conf"
         run_root rm -f "${host_conf}.deploy-backup"
         warn "Caddy config test failed — rolled back, nothing was changed."
-        exit 1
+        return 1
       fi
       run_root rm -f "${host_conf}.deploy-backup"
       if ! "${DOCKER[@]}" exec "$c" caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile; then
         warn "Caddy reload failed — config was written; check: docker logs ${c}"
-        exit 1
+        return 1
       fi
       say "✔ ${domain} added to the Caddy container (it provisions HTTPS itself)."
       front_server="docker-caddy"
@@ -515,60 +698,85 @@ BLOCK
       fi
       warn "Mounts of ${c}:"
       "${DOCKER[@]}" inspect "$c" --format '{{range .Mounts}}  {{.Source}} -> {{.Destination}}{{println}}{{end}}' 2>/dev/null || true
-      exit 1
+      return 1
       ;;
     *)
       warn "Container '${c}' runs image '${image}' — not auto-wirable yet. Mounts:"
       "${DOCKER[@]}" inspect "$c" --format '{{range .Mounts}}  {{.Source}} -> {{.Destination}}{{println}}{{end}}' 2>/dev/null || true
-      warn "Tell me which proxy it is (Caddy can be wired in one command)."
-      exit 1
+      warn "Tell me which proxy it is (Caddy gets wired in one command)."
+      return 1
       ;;
   esac
 }
 
 setup_proxy() {
   ensure_curl
-  local domain="omnivex-academy.xyz" port
+  local domain="omnivex-academy.xyz" port forced_worker=0
   port="$(get_env_val PORT)"
   port="${port:-3000}"
 
-  detect_front
-  case "$front_server" in
-    nginx)
-      say "nginx found — configuring our server block…"
-      setup_nginx_proxy "$domain" "$port"
-      ;;
-    free)
-      say "Port 80 is free — installing nginx…"
-      if command -v apt-get >/dev/null 2>&1; then
-        run_root apt-get update -y >/dev/null 2>&1 || true
-        run_root apt-get install -y nginx >/dev/null
-      elif command -v dnf >/dev/null 2>&1; then
-        run_root dnf install -y nginx >/dev/null
-      elif command -v yum >/dev/null 2>&1; then
-        run_root yum install -y nginx >/dev/null
-      else
-        warn "No supported package manager — install nginx yourself, then re-run ./deploy.sh proxy."
-        exit 1
-      fi
-      front_server="nginx"
-      setup_nginx_proxy "$domain" "$port"
-      ;;
-    apache) setup_apache "$domain" "$port" ;;
-    caddy) setup_caddy "$domain" "$port" ;;
-    docker | nginx-container) setup_docker_proxy "$domain" "$port" ;;
-    *)
-      warn "Port 80 is held by a process this script does not manage (${front_server}):"
-      printf '%s\n' "$port80_line"
-      if command -v docker >/dev/null 2>&1; then
-        docker ps --filter "publish=80" --format '  container: {{.Names}}   image: {{.Image}}' 2>/dev/null || true
-      fi
-      warn "Nothing was changed. Free port 80, or tell me which service that is and"
-      warn "omnivex-academy.xyz will be wired into it."
-      warn "Full web-layer report: ./deploy.sh doctor  (section 9)"
+  if [ "$(get_env_val PROXY_MODE)" = "worker" ]; then forced_worker=1; fi
+
+  if [ "$forced_worker" = "1" ]; then
+    if ! setup_worker; then
+      warn "Worker front failed — full report: ./deploy.sh doctor (section 9)."
       exit 1
-      ;;
-  esac
+    fi
+  else
+    detect_front
+    case "$front_server" in
+      nginx)
+        say "nginx found — configuring our server block…"
+        setup_nginx_proxy "$domain" "$port"
+        ;;
+      free)
+        say "Port 80 is free — installing nginx…"
+        if command -v apt-get >/dev/null 2>&1; then
+          run_root apt-get update -y >/dev/null 2>&1 || true
+          run_root apt-get install -y nginx >/dev/null
+        elif command -v dnf >/dev/null 2>&1; then
+          run_root dnf install -y nginx >/dev/null
+        elif command -v yum >/dev/null 2>&1; then
+          run_root yum install -y nginx >/dev/null
+        else
+          warn "No supported package manager — install nginx yourself, then re-run ./deploy.sh proxy."
+          exit 1
+        fi
+        front_server="nginx"
+        setup_nginx_proxy "$domain" "$port"
+        ;;
+      apache) setup_apache "$domain" "$port" ;;
+      caddy) setup_caddy "$domain" "$port" ;;
+      docker | nginx-container)
+        if ! setup_docker_proxy "$domain" "$port"; then
+          say "Native wiring unavailable — falling back to the Cloudflare Worker front…"
+          if ! setup_worker; then
+            warn "Worker front failed too — full report: ./deploy.sh doctor (section 9)."
+            exit 1
+          fi
+        fi
+        ;;
+      *)
+        warn "Port 80 is held by a process this script does not manage (${front_server}):"
+        printf '%s\n' "$port80_line"
+        if command -v docker >/dev/null 2>&1; then
+          docker ps --filter "publish=80" --format '  container: {{.Names}}   image: {{.Image}}' 2>/dev/null || true
+        fi
+        say "Trying the Cloudflare Worker front instead (that service is left untouched)…"
+        if ! setup_worker; then
+          warn "Worker front unavailable. Free port 80, or wire the domain into that"
+          warn "service yourself. Full report: ./deploy.sh doctor (section 9)."
+          exit 1
+        fi
+        ;;
+    esac
+    # Leaving Worker mode behind a native front: drop the origin-port override.
+    if [ "$front_server" != "worker" ] && grep -qs "Cloudflare Worker mode" docker-compose.override.yml; then
+      say "Leaving Worker mode — removing the origin-port override…"
+      rm -f docker-compose.override.yml
+      "${COMPOSE[@]}" up -d
+    fi
+  fi
 
   # Firewall — applies to every front type.
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '^Status: active'; then
@@ -592,6 +800,10 @@ do_tls() {
   local domain="omnivex-academy.xyz"
   local plugin="--nginx" pkg="python3-certbot-nginx"
 
+  if [ "$front" = "worker" ]; then
+    say "Worker front — HTTPS is at Cloudflare's edge; no origin certificate needed."
+    return 0
+  fi
   if [ "$front" = "caddy" ]; then
     say "Caddy provisions its own certificate — nothing to request here."
     return 0
@@ -807,6 +1019,10 @@ deploy() {
 
   # ---- 8. HTTPS certificate (per front-end) --------------------
   case "$front_server" in
+    worker)
+      say "✔ Worker front: HTTPS terminates at Cloudflare's edge — no origin certificate needed."
+      cert_ready=1
+      ;;
     caddy | docker-caddy)
       say "Caddy obtains its own certificate — waiting for HTTPS…"
     if wait_https; then
@@ -1121,14 +1337,36 @@ case "$CMD" in
   backup) do_backup ;;
   proxy)
     require_env
-    setup_proxy
     cf_init
+    setup_proxy
     if [ -n "$cf_zone_id" ]; then
       cf_ensure_dns
       cf_set_ssl full
     else
       cf_hint
     fi
+    ;;
+  worker)
+    # One-time Worker front: every step reads the token already in .env.
+    require_env
+    ensure_curl
+    say "One-time Cloudflare Worker setup (token read from .env)…"
+    cf_init
+    if [ -z "$cf_zone_id" ]; then
+      warn "CLOUDFLARE_API_TOKEN in .env could not resolve the zone omnivex-academy.xyz."
+      warn "Fix the token, then re-run:  ./deploy.sh worker"
+      exit 1
+    fi
+    # The proxied A record must exist before the route can receive traffic.
+    cf_ensure_dns
+    if ! setup_worker; then
+      warn "Worker setup did not complete — the message above names the missing step."
+      exit 1
+    fi
+    cf_set_ssl full
+    echo
+    say "✔ One-time Worker setup complete. Re-running './deploy.sh worker' is safe:"
+    say "  it only re-applies the same port, script, routes, DNS record and SSL mode."
     ;;
   tls)
     require_env
