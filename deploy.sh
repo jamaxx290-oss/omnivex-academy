@@ -48,6 +48,16 @@ cd "$(dirname "$0")"
 
 CMD="${1:-}"
 
+# Single source of truth for the Worker's hostname. The proxy relayer passes
+# every forwarded request to the origin with Host = this value, because the
+# origin server (the Docker container) sets session cookies, CORS and some
+# auth callbacks based on APP_URL. If WORKER_HOST here differs from APP_URL
+# in .env, the origin reply for requests that arrive from
+# app.omnivex-academy.xyz is still built against whatever APP_URL the container
+# knows — you may see a deviation on POST redirects only, which this script
+# cannot fully reconcile from the edge. (username)
+WORKER_HOST="app.omnivex-academy.xyz"
+
 say() { printf '\033[1;35m%s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m%s\033[0m\n' "$*"; }
 
@@ -471,11 +481,14 @@ render_worker_js() {
   cat >"$out" <<WORKER
 // Managed by ./deploy.sh proxy — Cloudflare Worker front for omnivex-academy.xyz
 const ORIGIN = "http://${ip}:${wport}";
+const HOST  = "${WORKER_HOST}";
 
 export default {
   async fetch(request) {
     const src = new URL(request.url);
     const target = new URL(ORIGIN + src.pathname + src.search);
+    const newHeaders = new Headers(headers);
+    newHeaders.set("Host", HOST);
 
     // WebSocket (live chat / calls): bridge client ⇄ origin explicitly.
     const upgrade = (request.headers.get("Upgrade") || "").toLowerCase();
@@ -502,7 +515,7 @@ export default {
     headers.delete("Accept-Encoding");
     const init = { method: request.method, headers, redirect: "manual" };
     if (request.method !== "GET" && request.method !== "HEAD") init.body = request.body;
-    return fetch(target.href, init);
+    return fetch(target.href, { ...init, headers: newHeaders });
   },
 };
 WORKER
@@ -560,7 +573,7 @@ cf_ensure_route() {
 
 setup_worker() {
   local domain="omnivex-academy.xyz" port wport ip js
-  local i healthy=0 ok=0 r
+  local i healthy=0 ok=0 r http body
   port="$(get_env_val PORT)"; port="${port:-3000}"
   wport="$(get_env_val WORKER_ORIGIN_PORT)"; wport="${wport:-8443}"
 
@@ -605,7 +618,7 @@ OVERRIDE
     return 1
   fi
   js="$(mktemp .worker.XXXXXX.js)"
-  render_worker_js "$js" "$ip" "$wport"
+  render_worker_js "$js" "$ip" "$wport" "$subdomain"
   if ! cf_upload_worker "$js"; then
     rm -f "$js"
     warn "Worker upload did not complete — Cloudflare's reply is printed above."
@@ -632,16 +645,30 @@ OVERRIDE
     say "ufw: origin port ${wport} limited to Cloudflare address ranges."
   fi
 
-  # 6. End-to-end check through the edge.
+  # 6. End-to-end check through the edge — report exactly what came back.
   say "Verifying https://${domain} through the Worker…"
+  r=""
   for i in $(seq 1 20); do
-    if curl -fsS --max-time 8 "https://${domain}/api/health" >/dev/null 2>&1; then ok=1; break; fi
+    r="$(curl -sS --max-time 8 "https://${domain}/api/health" -w $'\n%{http_code}' 2>&1 || true)"
+    if [ "${r##*$'\n'}" = "200" ]; then ok=1; break; fi
     sleep 3
   done
   if [ "$ok" = "1" ]; then
     say "✔ https://${domain} answers through the Cloudflare Worker."
   else
-    warn "Edge check has not passed yet (DNS may still be propagating) — ./deploy.sh status later."
+    http="${r##*$'\n'}"
+    body="$(printf '%s' "${r%$'\n'*}" | tr -d '\r\n' | cut -c1-160)"
+    warn "Edge check: HTTP ${http:-?} for https://${domain}/api/health — ${body:-no reply}"
+    case "$http" in
+      403)
+        warn "  'error code: 1003' means Cloudflare is not proxying the apex hostname:"
+        warn "  the DNS block above must end up as ONE Proxied (orange) A record." ;;
+      521|522|523|530)
+        warn "  The edge accepted the name but could not reach this server on port ${wport}." ;;
+      000)
+        warn "  No reply from the edge — DNS may still be propagating; re-run in a minute." ;;
+    esac
+    warn "Re-check later: ./deploy.sh status"
   fi
   front_server="worker"
   return 0
@@ -1161,30 +1188,114 @@ cf_init() {
 }
 
 # Make sure the A record exists, points at this server and is proxied.
+# Cloudflare answers "error code: 1003" on the apex while subdomains work when
+# the hostname is not actually proxied there: a stale duplicate record, a grey
+# (DNS-only) record, or a record still pointing somewhere else — the Worker route
+# never even runs in that state. So: print every record Cloudflare holds for the
+# apex, confirm this zone is the one serving the domain, then reduce the apex to
+# exactly one proxied A record for this server.
 cf_ensure_dns() {
-  local ip resp record_id
+  local ip resp list line id type content prox keep="" first="" removed=0
+  local zoneinfo status assigned served
+
   ip="$(curl -4 -sS --max-time 10 https://api.ipify.org 2>/dev/null || true)"
   if [ -z "$ip" ]; then
     warn "Could not detect this server's public IP — create the A record manually."
     return 0
   fi
-  resp="$(cf_call GET "/zones/${cf_zone_id}/dns_records?type=A&name=omnivex-academy.xyz" || true)"
+
+  # Is this token's zone the one that really answers for the domain?
+  zoneinfo="$(cf_call GET "/zones/${cf_zone_id}" || true)"
+  if cf_ok "$zoneinfo"; then
+    status="$(printf '%s' "$zoneinfo" | grep -o '"status":"[a-z]*"' | head -1 | cut -d'"' -f4 || true)"
+    assigned="$(printf '%s' "$zoneinfo" | grep -o '"name_servers":\[[^]]*\]' | sed 's/^.*\[//' | grep -o '"[^"]*"' | tr -d '"' | sort | tr '\n' ' ' || true)"
+    served="$(curl -s --max-time 8 -H 'accept: application/dns-json' \
+        'https://1.1.1.1/dns-query?name=omnivex-academy.xyz&type=NS' 2>/dev/null \
+        | grep -o '"data":"[^"]*"' | cut -d'"' -f4 | sort | tr '\n' ' ' || true)"
+    if [ -n "$status" ] && [ "$status" != "active" ]; then
+      warn "Cloudflare zone status is '${status}' — an inactive zone cannot proxy traffic."
+    fi
+    if [ -n "$assigned" ] && [ -n "$served" ] && [ "$assigned" != "$served" ]; then
+      warn "This token's zone is served by:${assigned}"
+      warn "But omnivex-academy.xyz actually resolves via:${served}"
+      warn "Records and routes written here would never reach visitors — fix nameservers first."
+    fi
+    if [ -n "$served" ]; then
+      say "  zone status: ${status:-unknown} — nameservers: ${served}"
+    fi
+  fi
+
+  resp="$(cf_call GET "/zones/${cf_zone_id}/dns_records?name=omnivex-academy.xyz&per_page=100" || true)"
   if ! cf_ok "$resp"; then
-    warn "Cloudflare DNS lookup failed — create the A record manually."
+    warn "Cloudflare DNS lookup failed — $(cf_error_text "$resp")"
+    warn "Create the apex record manually: omnivex-academy.xyz → ${ip}, Proxied (orange)."
     return 0
   fi
-  record_id="$(printf '%s' "$resp" | grep -o '"id":"[a-f0-9]\{32\}"' | head -1 | cut -d'"' -f4 || true)"
-  if [ -n "$record_id" ]; then
-    resp="$(cf_call PATCH "/zones/${cf_zone_id}/dns_records/${record_id}" \
-      "{\"type\":\"A\",\"name\":\"omnivex-academy.xyz\",\"content\":\"${ip}\",\"ttl\":1,\"proxied\":true}" || true)"
-  else
+  # Every record object starts with "id" — split there and drop the envelope.
+  list="$(printf '%s' "$resp" | sed 's/{"id":"/\n{"id":"/g' | grep '^{"id":"' || true)"
+
+  # Pass 1 — show what Cloudflare holds, and pick the record to keep.
+  if [ -n "$list" ]; then
+    say "Cloudflare DNS records for omnivex-academy.xyz:"
+    while IFS= read -r line; do
+      if [ -z "$line" ]; then continue; fi
+      id="$(printf '%s' "$line" | grep -o '"id":"[a-f0-9]\{32\}"' | head -1 | cut -d'"' -f4 || true)"
+      type="$(printf '%s' "$line" | grep -o '"type":"[A-Z0-9]*"' | head -1 | cut -d'"' -f4 || true)"
+      content="$(printf '%s' "$line" | grep -o '"content":"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
+      prox="$(printf '%s' "$line" | grep -o '"proxied":[a-z]*' | head -1 | cut -d: -f2 || true)"
+      if [ -z "$type" ] || [ -z "$content" ]; then
+        warn "  ! could not read one record from the API reply — skipping it"
+        continue
+      fi
+      say "  - ${type} ${content} proxied=${prox:-no}"
+      if [ -z "$first" ] && [ "$type" = "A" ]; then first="$id"; fi
+      if [ "$type" = "A" ] && [ "$prox" = "true" ] && [ "$content" = "$ip" ]; then keep="$id"; fi
+    done <<<"$list"
+    if [ -z "$keep" ]; then keep="$first"; fi
+  fi
+
+  # Make sure the kept record exists and points here, proxied.
+  if [ -z "$keep" ]; then
     resp="$(cf_call POST "/zones/${cf_zone_id}/dns_records" \
       "{\"type\":\"A\",\"name\":\"omnivex-academy.xyz\",\"content\":\"${ip}\",\"ttl\":1,\"proxied\":true}" || true)"
-  fi
-  if cf_ok "$resp"; then
-    say "✔ Cloudflare DNS: omnivex-academy.xyz → ${ip} (proxied)"
+    if ! cf_ok "$resp"; then
+      warn "Cloudflare refused the apex A record — $(cf_error_text "$resp")"
+      warn "Create it manually: omnivex-academy.xyz → ${ip}, Proxied (orange)."
+      return 0
+    fi
+    keep="$(printf '%s' "$resp" | grep -o '"id":"[a-f0-9]\{32\}"' | head -1 | cut -d'"' -f4 || true)"
+    say "  + A ${ip} proxied=true (created)"
   else
-    warn "Could not write the DNS record — set omnivex-academy.xyz → ${ip}, Proxied, manually."
+    resp="$(cf_call PATCH "/zones/${cf_zone_id}/dns_records/${keep}" \
+      "{\"type\":\"A\",\"name\":\"omnivex-academy.xyz\",\"content\":\"${ip}\",\"ttl\":1,\"proxied\":true}" || true)"
+    if ! cf_ok "$resp"; then
+      warn "Cloudflare could not update the apex record — $(cf_error_text "$resp")"
+      warn "Set omnivex-academy.xyz → ${ip}, Proxied (orange), manually."
+      return 0
+    fi
+  fi
+
+  # Pass 2 — any other record on the apex splits traffic and breaks the proxy.
+  while IFS= read -r line; do
+    if [ -z "$line" ]; then continue; fi
+    id="$(printf '%s' "$line" | grep -o '"id":"[a-f0-9]\{32\}"' | head -1 | cut -d'"' -f4 || true)"
+    type="$(printf '%s' "$line" | grep -o '"type":"[A-Z0-9]*"' | head -1 | cut -d'"' -f4 || true)"
+    content="$(printf '%s' "$line" | grep -o '"content":"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
+    prox="$(printf '%s' "$line" | grep -o '"proxied":[a-z]*' | head -1 | cut -d: -f2 || true)"
+    if [ -z "$id" ] || [ -z "$type" ] || [ "$id" = "$keep" ]; then continue; fi
+    resp="$(cf_call DELETE "/zones/${cf_zone_id}/dns_records/${id}" || true)"
+    if cf_ok "$resp"; then
+      removed=$((removed + 1))
+      say "  - removed ${type:-?} ${content:-?} proxied=${prox:-no} (duplicate apex record)"
+    else
+      warn "  ! could not remove ${type:-?} ${content:-?}: $(cf_error_text "$resp")"
+    fi
+  done <<<"$list"
+
+  if [ "$removed" -gt 0 ]; then
+    say "✔ Cloudflare DNS: omnivex-academy.xyz → ${ip} (proxied) — ${removed} stale record(s) removed."
+  else
+    say "✔ Cloudflare DNS: omnivex-academy.xyz → ${ip} (proxied)"
   fi
 }
 
