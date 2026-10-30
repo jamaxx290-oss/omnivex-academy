@@ -508,20 +508,46 @@ export default {
 WORKER
 }
 
+# Upload the Worker script. Module workers need the
+# "application/javascript+module" part type; a validation rejection (400/415/422)
+# is retried once with the classic type, and every failure reports Cloudflare's
+# own errors[] so the fix is never guessed at.
 cf_upload_worker() {
-  local js="$1" resp
-  resp="$(curl -sS --max-time 30 -X PUT \
-    "${CF_API}/accounts/${cf_account_id}/workers/scripts/omnivex-academy-proxy" \
-    -H "Authorization: Bearer ${cf_token}" \
-    -F 'metadata={"main_module":"worker.js","compatibility_date":"2025-01-01"};type=application/json' \
-    -F "worker.js=@${js};type=application/javascript" || true)"
-  cf_ok "$resp"
+  local js="$1" out http body msg ctype
+  for ctype in application/javascript+module application/javascript; do
+    out="$(curl -sS --max-time 30 -w $'\n%{http_code}' -X PUT \
+      "${CF_API}/accounts/${cf_account_id}/workers/scripts/omnivex-academy-proxy" \
+      -H "Authorization: Bearer ${cf_token}" \
+      -F 'metadata={"main_module":"worker.js","compatibility_date":"2025-01-01"};type=application/json' \
+      -F "worker.js=@${js};type=${ctype}" 2>&1)" || {
+        warn "Could not reach the Cloudflare API: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
+        return 1
+      }
+    http="${out##*$'\n'}"
+    body="${out%$'\n'*}"
+    case "$http" in 200|201) return 0 ;; esac
+    if [ "$ctype" = "application/javascript+module" ]; then
+      case "$http" in 400|415|422) continue ;; esac
+    fi
+    msg="$(cf_error_text "$body")"
+    if [ -z "$msg" ]; then msg="$(printf '%s' "$body" | tr -d '\n' | cut -c1-200)"; fi
+    warn "Cloudflare rejected the Worker upload (HTTP ${http}): ${msg}"
+    case "$http" in
+      401|403) warn "  Token scope needed: Workers Scripts — Edit (Account)." ;;
+      404)     warn "  Token scope needed: Account Settings — Read (account id could not be matched)." ;;
+    esac
+    return 1
+  done
+  return 1
 }
 
 cf_ensure_route() {
   local pattern="$1" resp rid
   resp="$(cf_call GET "/zones/${cf_zone_id}/workers/routes" || true)"
-  if ! cf_ok "$resp"; then return 1; fi
+  if ! cf_ok "$resp"; then
+    warn "Cloudflare could not list routes for ${pattern}: $(cf_error_text "$resp")"
+    return 1
+  fi
   rid="$(printf '%s' "$resp" | grep -o '{[^{}]*}' | grep -F "\"pattern\":\"${pattern}\"" \
     | grep -o '"id":"[a-f0-9]\{32\}"' | head -1 | cut -d'"' -f4 || true)"
   if [ -n "$rid" ]; then
@@ -531,7 +557,10 @@ cf_ensure_route() {
     resp="$(cf_call POST "/zones/${cf_zone_id}/workers/routes" \
       "{\"pattern\":\"${pattern}\",\"script\":\"omnivex-academy-proxy\"}" || true)"
   fi
-  cf_ok "$resp"
+  if ! cf_ok "$resp"; then
+    warn "Cloudflare rejected route ${pattern}: $(cf_error_text "$resp")"
+    return 1
+  fi
 }
 
 setup_worker() {
@@ -584,7 +613,7 @@ OVERRIDE
   render_worker_js "$js" "$ip" "$wport"
   if ! cf_upload_worker "$js"; then
     rm -f "$js"
-    warn "Worker upload failed — add to CLOUDFLARE_API_TOKEN: Workers Scripts: Edit (Account)."
+    warn "Worker upload did not complete — Cloudflare's reply is printed above."
     return 1
   fi
   rm -f "$js"
@@ -592,7 +621,8 @@ OVERRIDE
 
   # 4. Routes: only the apex (+www) — the sibling subdomain is untouched.
   if ! cf_ensure_route "${domain}/*"; then
-    warn "Route attach failed — add to CLOUDFLARE_API_TOKEN: Workers Routes: Edit (Zone ${domain})."
+    warn "Route attach failed — the Cloudflare reply is printed above"
+    warn "(usual missing scope: Workers Routes — Edit, zone ${domain})."
     return 1
   fi
   cf_ensure_route "www.${domain}/*" || true
@@ -1107,6 +1137,14 @@ cf_call() {
 }
 
 cf_ok() { printf '%s' "$1" | grep -q '"success"[[:space:]]*:[[:space:]]*true'; }
+
+# First errors[].message values from a Cloudflare response (empty when none).
+# Keeps failures actionable: the API tells us what is wrong, we do not guess.
+cf_error_text() {
+  printf '%s' "$1" | grep -o '"message":[[:space:]]*"[^"]*"' | head -3 \
+    | sed 's/^"message":[[:space:]]*"//; s/"$//' \
+    | awk 'NR>1{printf " / "}{printf "%s",$0} END{print ""}' || true
+}
 
 # Resolve the zone id once; falls back to "manual" mode when unavailable.
 cf_init() {
