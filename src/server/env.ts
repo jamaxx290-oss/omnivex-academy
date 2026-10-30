@@ -55,8 +55,8 @@ export const env = {
     process.env.RESEND_FROM_EMAIL || "hello@omnivex-academy.xyz",
   resendWebhookSecret: process.env.RESEND_WEBHOOK_SECRET || "",
 
-  paystackSecretKey: process.env.PAYSTACK_SECRET_KEY || "",
-  paystackPublicKey: process.env.PAYSTACK_PUBLIC_KEY || "",
+  paystackSecretKey: process.env.PAYSTACK_SECRET_KEY || undefined,
+  paystackPublicKey: process.env.PAYSTACK_PUBLIC_KEY || undefined,
 
   adminEmail: process.env.ADMIN_EMAIL || "",
   adminPassword: process.env.ADMIN_PASSWORD || "",

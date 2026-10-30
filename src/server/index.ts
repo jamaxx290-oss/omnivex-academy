@@ -30,6 +30,8 @@ async function main(): Promise<void> {
     }
     if (!env.paystackSecretKey) {
       console.log("[server] PAYSTACK_SECRET_KEY missing — checkout will be unavailable");
+    } else if (!env.paystackPublicKey) {
+      console.log("[server] PAYSTACK_PUBLIC_KEY missing — checkout will be unavailable");
     }
   });
 
