@@ -57,19 +57,19 @@ export async function initializePayment(userId: string): Promise<
   | { ok: true; reference: string; authorizationUrl: string; amountKobo: number }
   | { ok: false; error: string; code?: string }
 > {
+  const priceKobo = getMembershipPriceKobo();
+  if (priceKobo === null || priceKobo <= 0) {
+    return {
+      ok: false,
+      error: "Membership price has not been configured yet. Please contact the administrator.",
+      code: "PRICE_NOT_SET",
+    };
+  }
   if (!paystackConfigured()) {
     return {
       ok: false,
       error: "Payments are not configured yet. Please contact the administrator.",
       code: "PAYSTACK_NOT_CONFIGURED",
-    };
-  }
-  const priceKobo = getMembershipPriceKobo();
-  if (priceKobo === null || priceKobo <= 0) {
-    return {
-      ok: false,
-      error: "Membership price has not been configured yet.",
-      code: "PRICE_NOT_SET",
     };
   }
   const u = await db.query.user.findFirst({ where: eq(user.id, userId) });

@@ -59,7 +59,7 @@ router.post(
     const result = await initializePayment(u.id);
     if (!result.ok) {
       return res
-        .status(result.code ? 400 : 502)
+        .status(result.code === "PAYSTACK_NOT_CONFIGURED" ? 503 : 400)
         .json({ error: result.error, code: result.code });
     }
     res.json({

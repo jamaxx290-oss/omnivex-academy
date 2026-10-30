@@ -17,10 +17,9 @@ export function bootstrapSettings(): void {
     setSetting("terms_text", "");
   }
   if (getSetting("membership_price_kobo") === null) {
-    setSetting(
-      "membership_price_kobo",
-      env.initialPriceKobo !== null ? String(env.initialPriceKobo) : "",
-    );
+    if (env.initialPriceKobo !== undefined && env.initialPriceKobo > 0) {
+      setSetting("membership_price_kobo", String(env.initialPriceKobo));
+    }
   }
   if (getSetting("app_name") === null) setSetting("app_name", "Omnivex Academy");
   if (getSetting("announcement_counter") === null) setSetting("announcement_counter", "0");

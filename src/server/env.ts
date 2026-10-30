@@ -67,7 +67,7 @@ export const env = {
 
   initialPriceKobo: process.env.MEMBERSHIP_PRICE_KOBO
     ? Number(process.env.MEMBERSHIP_PRICE_KOBO)
-    : null,
+    : undefined,
 };
 
 fs.mkdirSync(env.uploadsDir, { recursive: true });
