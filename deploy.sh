@@ -58,8 +58,11 @@ CMD="${1:-}"
 # cannot fully reconcile from the edge. (username)
 WORKER_HOST="app.omnivex-academy.xyz"
 
-say() { printf '\033[1;35m%s\033[0m\n' "$*"; }
-warn() { printf '\033[1;33m%s\033[0m\n' "$*"; }
+export WORKER_HOST
+
+
+say() { printf '\033[1;35m%s\033[0m\n' "${1:-}"; }
+warn() { printf '\033[1;33m%s\033[0m\n' "${1:-}"; }
 
 usage() {
   cat <<'EOF'
@@ -477,23 +480,36 @@ cf_account() {
 }
 
 render_worker_js() {
-  local out="$1" ip="$2" wport="$3"
+  # Writes a Cloudflare Worker (module) that relayers request -> origin.
+  # ORIGIN is the origin server URL the Worker fetches against.
+  # HOST is the Host header the Worker sets on the fetched request.
+  # HOST defaults to WORKER_HOST (script-scope constant); a caller may pass
+  # an explicit value as the 4th argument for per-subdomain Worker scripts.  local out="$1" ip="$2" wport="$3"
+  local host="${4:-${WORKER_HOST}}"
+  if [ -z "$host" ]; then
+    warn "render_worker_js: no HOST - cannot generate the Worker script"
+    return 1
+  fi
+
   cat >"$out" <<WORKER
-// Managed by ./deploy.sh proxy — Cloudflare Worker front for omnivex-academy.xyz
-const ORIGIN = "http://${ip}:${wport}";
-const HOST  = "${WORKER_HOST}";
+// Managed by ./deploy.sh proxy - Cloudflare Worker front for omnivex-academy.xyz
+const ORIGIN = "http://${ip}:${wport}";const HOST  = "${host}";
 
 export default {
   async fetch(request) {
-    const src = new URL(request.url);
-    const target = new URL(ORIGIN + src.pathname + src.search);
-    const newHeaders = new Headers(headers);
+    const src = new URL(request.url);    const target = new URL(ORIGIN + src.pathname + src.search);
+    const newHeaders = new Headers(request.headers);
+    newHeaders.delete("Accept-Encoding");
     newHeaders.set("Host", HOST);
 
-    // WebSocket (live chat / calls): bridge client ⇄ origin explicitly.
+    // WebSocket (live chat / calls): bridge client <-> origin explicitly.
     const upgrade = (request.headers.get("Upgrade") || "").toLowerCase();
     if (upgrade === "websocket") {
-      const up = await fetch(target.href, { headers: request.headers });
+      const wsTarget = new URL(target.href);
+      const wsHeaders = new Headers(request.headers);
+      wsHeaders.delete("Accept-Encoding");
+      wsHeaders.set("Host", HOST);
+      const up = await fetch(wsTarget.href, { headers: wsHeaders });
       const upWS = up.webSocket;
       if (!upWS) return new Response("origin refused the websocket", { status: 502 });
       upWS.accept();
@@ -528,6 +544,7 @@ WORKER
 # token 'export'. Failures print Cloudflare's own errors[] rather than guess.
 cf_upload_worker() {
   local js="$1" out http body msg
+
   out="$(curl -sS --max-time 30 -w $'\n%{http_code}' -X PUT \
     "${CF_API}/accounts/${cf_account_id}/workers/scripts/omnivex-academy-proxy" \
     -H "Authorization: Bearer ${cf_token}" \
@@ -573,7 +590,6 @@ cf_ensure_route() {
 
 setup_worker() {
   local domain="omnivex-academy.xyz" port wport ip js
-  local i healthy=0 ok=0 r http body
   port="$(get_env_val PORT)"; port="${port:-3000}"
   wport="$(get_env_val WORKER_ORIGIN_PORT)"; wport="${wport:-8443}"
 
@@ -601,7 +617,9 @@ OVERRIDE
   say "Publishing the origin on port ${wport}…"
   "${COMPOSE[@]}" up -d
 
-  # 2. Container was recreated — re-check health.
+  # 2. Container was recreated — wait for the app container itself, and also
+  #    probe the published worker origin port once so a transient 525 at the
+  #    edge does not read as 'started OK' before the app is reachable.
   for i in $(seq 1 20); do
     if curl -fsS --max-time 4 "http://127.0.0.1:${port}/api/health" >/dev/null 2>&1; then healthy=1; break; fi
     sleep 3
@@ -609,6 +627,15 @@ OVERRIDE
   if [ "$healthy" != "1" ]; then
     warn "App not healthy after publishing port ${wport} — ./deploy.sh logs"
     return 1
+  fi
+  say "Origin container healthy on port ${port}; origin port ${wport} published."
+  origin_ok=0
+  for i in $(seq 1 20); do
+    if curl -fsS --max-time 6 "http://127.0.0.1:${wport}/api/health" >/dev/null 2>&1; then origin_ok=1; break; fi
+    sleep 3
+  done
+  if [ "$origin_ok" != "1" ]; then
+    warn "Origin is healthy but port ${wport} did not answer /api/health — edge may report 525"
   fi
 
   # 3. Generate + upload the Worker.
@@ -618,7 +645,7 @@ OVERRIDE
     return 1
   fi
   js="$(mktemp .worker.XXXXXX.js)"
-  render_worker_js "$js" "$ip" "$wport" "$subdomain"
+  render_worker_js "$js" "$ip" "$wport" "${WORKER_HOST}"
   if ! cf_upload_worker "$js"; then
     rm -f "$js"
     warn "Worker upload did not complete — Cloudflare's reply is printed above."
@@ -1173,6 +1200,12 @@ cf_init() {
   cf_token="$(get_env_val CLOUDFLARE_API_TOKEN)"
   cf_zone_id=""
   if [ -z "$cf_token" ]; then return 0; fi
+  cf_token="${cf_token//["'"'"']/}"
+  if [ -z "$cf_token" ]; then
+    warn "CLOUDFLARE_API_TOKEN present but stripped to empty after removing quotes — fix the token."
+    cf_token=""
+    return 0
+  fi
   local resp
   resp="$(cf_call GET "/zones?name=omnivex-academy.xyz" || true)"
   if ! cf_ok "$resp"; then
@@ -1208,10 +1241,10 @@ cf_ensure_dns() {
   zoneinfo="$(cf_call GET "/zones/${cf_zone_id}" || true)"
   if cf_ok "$zoneinfo"; then
     status="$(printf '%s' "$zoneinfo" | grep -o '"status":"[a-z]*"' | head -1 | cut -d'"' -f4 || true)"
-    assigned="$(printf '%s' "$zoneinfo" | grep -o '"name_servers":\[[^]]*\]' | sed 's/^.*\[//' | grep -o '"[^"]*"' | tr -d '"' | sort | tr '\n' ' ' || true)"
+    assigned="$(printf '%s' "$zoneinfo" | grep -o '"name_servers":\[[^]]*\]' | sed 's/^.*\[//' | grep -o '"[^"]*"' | tr -d '"' | tr '[:upper:]' '[:lower:]' | sed 's/\.$//' | sort | tr '\n' ' ' || true)"
     served="$(curl -s --max-time 8 -H 'accept: application/dns-json' \
         'https://1.1.1.1/dns-query?name=omnivex-academy.xyz&type=NS' 2>/dev/null \
-        | grep -o '"data":"[^"]*"' | cut -d'"' -f4 | sort | tr '\n' ' ' || true)"
+        | grep -o '"data":"[^"]*"' | cut -d'"' -f4 | tr '[:upper:]' '[:lower:]' | sed 's/\.$//' | sort | tr '\n' ' ' || true)"
     if [ -n "$status" ] && [ "$status" != "active" ]; then
       warn "Cloudflare zone status is '${status}' — an inactive zone cannot proxy traffic."
     fi
@@ -1249,7 +1282,7 @@ cf_ensure_dns() {
       fi
       say "  - ${type} ${content} proxied=${prox:-no}"
       if [ -z "$first" ] && [ "$type" = "A" ]; then first="$id"; fi
-      if [ "$type" = "A" ] && [ "$prox" = "true" ] && [ "$content" = "$ip" ]; then keep="$id"; fi
+      if [ "$type" = "A" ] && [ "$prox" = "true" ] && [ "$content" = "${ip}" ]; then keep="$id"; fi
     done <<<"$list"
     if [ -z "$keep" ]; then keep="$first"; fi
   fi
