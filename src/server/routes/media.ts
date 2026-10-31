@@ -167,11 +167,19 @@ router.post("/api/uploads", requireMember, (req: Request, res: Response) => {
 
     const mime = resolveMime(file);
 
-    if (file.size > MAX_IMAGE && !mime.startsWith("video/")) {
-      if (file.size > MAX_AUDIO) {
-        fs.unlinkSync(file.path);
-        return res.status(400).json({ error: "File is too large" });
-      }
+    // Per-type limit. The old check only compared non-video files against the
+    // 25 MB image ceiling, so • voice notes became max-25 MB (8 MB intended)
+    // and documents inherited the image ceiling too.
+    const limit = mime.startsWith("video/")
+      ? MAX_VIDEO
+      : mime.startsWith("audio/")
+        ? MAX_AUDIO
+        : MAX_IMAGE;
+    if (file.size > limit) {
+      fs.unlinkSync(file.path);
+      return res
+        .status(400)
+        .json({ error: `File is too large (max ${Math.round(limit / 1024 / 1024)} MB)` });
     }
 
     const kind = String(req.body?.kind || "message") === "avatar" ? "avatar" : "message";
@@ -301,6 +309,7 @@ router.get("/media/*path", async (req: Request, res: Response) => {
     (Array.isArray(raw) ? raw.join("/") : String(raw || "")).replace(/^\//, ""),
   );
   if (!rel) return res.status(404).json({ error: "Not found" });
+  if (!u) return res.status(401).json({ error: "Sign in required" });
 
   // path traversal protection
   const abs = path.resolve(env.uploadsDir, rel);
@@ -308,8 +317,6 @@ router.get("/media/*path", async (req: Request, res: Response) => {
     return res.status(400).json({ error: "Invalid path" });
   }
   if (!fs.existsSync(abs)) return res.status(404).json({ error: "Not found" });
-
-  if (!u) return res.status(401).json({ error: "Sign in required" });
 
   const rec = sqlite
     .prepare(
@@ -326,32 +333,39 @@ router.get("/media/*path", async (req: Request, res: Response) => {
       }
     | undefined;
 
-  if (rec && !(await canAccessMedia(u, rec))) {
+  // Every stored file has an uploads row with its ACL. A file on disk with no
+  // row (deleted record, manual copy) must not be readable by any member.
+  if (!rec) return res.status(404).json({ error: "Not found" });
+  if (!(await canAccessMedia(u, rec))) {
     return res.status(403).json({ error: "Not allowed" });
   }
 
   const ext = path.extname(abs).slice(1).toLowerCase();
-  const mime = rec?.mime || MIME_BY_EXT[ext] || "application/octet-stream";
+  const mime = rec.mime || MIME_BY_EXT[ext] || "application/octet-stream";
   const stat = fs.statSync(abs);
 
   res.setHeader("Content-Type", mime);
   res.setHeader("Accept-Ranges", "bytes");
+  res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Cache-Control", "private, max-age=86400");
 
   // Documents are never rendered in the app: force a download so the
   // device opens them in whatever external app supports the format.
   if (isDocument(mime)) {
-    const dlName = safeOriginalName(rec?.original_name || undefined, path.basename(abs));
+    const dlName = safeOriginalName(rec.original_name || undefined, path.basename(abs));
     res.setHeader("Content-Disposition", `attachment; filename="${dlName}"`);
-    res.setHeader("X-Content-Type-Options", "nosniff");
   }
 
   const range = req.headers.range;
   if (range) {
     const m = /bytes=(\d*)-(\d*)/.exec(range);
     if (m) {
-      const start = m[1] ? parseInt(m[1], 10) : 0;
-      const end = m[2] ? parseInt(m[2], 10) : stat.size - 1;
+      // `bytes=-N` means "the last N bytes" — media players use it when they
+      // seek to the end of a clip.
+      const suffix = !m[1] && m[2] ? parseInt(m[2], 10) : null;
+      const start =
+        suffix !== null ? Math.max(0, stat.size - suffix) : m[1] ? parseInt(m[1], 10) : 0;
+      const end = suffix !== null ? stat.size - 1 : m[2] ? parseInt(m[2], 10) : stat.size - 1;
       if (start >= stat.size || end >= stat.size || start > end) {
         res.setHeader("Content-Range", `bytes */${stat.size}`);
         res.status(416).end();

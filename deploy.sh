@@ -39,6 +39,8 @@
 #   ./deploy.sh status    show container status + health
 #   ./deploy.sh doctor    one-shot crash report (state, logs, boot test,
 #                         native-module test, kernel segfaults, memory)
+#   ./deploy.sh envcheck  which env keys Docker can inject vs. what the running
+#                         container really has (names only, never values)
 #   ./deploy.sh backup    snapshot the database + uploads into ./backups
 #   ./deploy.sh proxy     install/configure nginx in front of the app (port 80)
 #   ./deploy.sh worker    ONE-TIME Cloudflare Worker front, driven entirely by
@@ -90,6 +92,10 @@ Commands:
             .env, no dashboard clicks; re-running only re-applies the same state
   tls EMAIL get a Let's Encrypt certificate on 443 (Cloudflare Full strict)
   doctor    one-shot crash report — run this when the app is down
+  envcheck  show which env keys Docker can inject, which the running container
+            actually has, and which the app is still missing (names only —
+            values are never printed). Use this when a key "is configured" but
+            the app still says it is not.
   new       force a from-scratch rebuild: removes the app image, the Docker
             build cache, dist/ and the Vite/TS caches, pulls the base images,
             rebuilds with --no-cache and recreates the container so the new
@@ -105,7 +111,7 @@ case "${CMD}" in
     usage
     exit 0
     ;;
-  logs | restart | stop | status | backup | proxy | tls | worker | doctor | new) ;;
+  logs | restart | stop | status | backup | proxy | tls | worker | doctor | new | envcheck) ;;
   *)
     usage >&2
     exit 1
@@ -126,9 +132,58 @@ run_root() {
   fi
 }
 
+# Read KEY from an env file (default .env). Tolerates the shapes people
+# actually type: leading whitespace, an `export ` prefix, spaces around `=`,
+# CRLF line endings and surrounding quotes. Values are printed to stdout only
+# for the caller to compare — this script never echoes them.
 get_env_val() {
-  if [ ! -f .env ]; then return 0; fi
-  awk -v k="$1" 'index($0, k "=") == 1 { print substr($0, length(k) + 2); exit }' .env
+  local k="$1" file="${2:-.env}"
+  [ -f "$file" ] || return 0
+  K="$k" awk '
+    {
+      raw = $0
+      sub(/\r$/, "", raw)
+      line = raw
+      sub(/^[[:space:]]+/, "", line)
+      sub(/^export[[:space:]]+/, "", line)
+      eq = index(line, "=")
+      if (eq == 0) next
+      key = substr(line, 1, eq - 1)
+      gsub(/[[:space:]]+$/, "", key)
+      if (key != ENVIRON["K"]) next
+      val = substr(line, eq + 1)
+      sub(/^[[:space:]]+/, "", val)
+      sub(/[[:space:]]+$/, "", val)
+      if (val ~ /^".*"$/ || val ~ /^\047.*\047$/) val = substr(val, 2, length(val) - 2)
+      print val
+      exit
+    }' "$file"
+}
+
+# Names of the variables the RUNNING container actually has — values are never
+# printed. This is the ground truth: .env can say anything, but only what
+# Docker injected reaches the app.
+CONTAINER_ENV=""
+container_env_names() {
+  "${DOCKER[@]}" inspect omnivex --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+    | cut -d= -f1 | sort || true
+}
+
+# Is KEY live in the container (preferred) or at least in .env?
+env_live() {
+  if [ -n "${CONTAINER_ENV:-}" ]; then
+    printf '%s\n' "$CONTAINER_ENV" | grep -qx "$1"
+  else
+    [ -n "$(get_env_val "$1")" ]
+  fi
+}
+
+# Is KEY written in FILE but commented out (# KEY=...)? Such a line is valid
+# syntax, but a '#' makes the whole line a comment, so Docker never injects it.
+# This is the usual reason a "configured" key is missing from the container.
+commented_out() {
+  local key="$1" file="${2:-.env}"
+  grep -qE "^[[:space:]]*#[[:space:]]*(export[[:space:]]+)?${key}[[:space:]]*=" "$file" 2>/dev/null
 }
 
 # set_env KEY VALUE — write KEY=VALUE into .env (replacing or appending).
@@ -989,6 +1044,135 @@ do_backup() {
   say "✔ backups/omnivex-${ts}.db  +  backups/uploads-${ts}.tgz"
 }
 
+# ---- env diagnostics (./deploy.sh envcheck) --------------------
+# Answers "the key IS configured, why does the app not see it?" without ever
+# printing a secret: shows which .env lines Docker can actually inject, the
+# key names the container really has, and what the app is still missing.
+do_envcheck() {
+  local file k val cenv any_comment typos
+  local keys="APP_URL PORT ADMIN_EMAIL ADMIN_PASSWORD BETTER_AUTH_SECRET \
+RESEND_API_KEY RESEND_WEBHOOK_SECRET RESEND_FROM_EMAIL \
+PAYSTACK_SECRET_KEY PAYSTACK_PUBLIC_KEY CLOUDFLARE_API_TOKEN MEMBERSHIP_PRICE_KOBO"
+
+  say "Environment check — key names and states only; values are never printed."
+
+  for file in .env .env.local; do
+    echo
+    if [ ! -f "$file" ]; then
+      say "$file: not present"
+      continue
+    fi
+    say "$file lines Docker can inject:"
+    awk '
+      {
+        raw = $0
+        sub(/\r$/, "", raw)
+        line = raw
+        sub(/^[[:space:]]+/, "", line)
+        if (line == "" || substr(line, 1, 1) == "#") next
+        state = ""
+        if (raw ~ /^[[:space:]]/) state = state "leading-space"
+        if (line ~ /^export[[:space:]]+/) { state = state " export-prefix"; sub(/^export[[:space:]]+/, "", line) }
+        if (index(line, "=") == 0) {
+          printf "  line %-4d %-28s MALFORMED (no =)\n", NR, line
+          next
+        }
+        key = substr(line, 1, index(line, "=") - 1)
+        if (key ~ /[[:space:]]$/) state = state " space-before-="
+        gsub(/[[:space:]]+$/, "", key)
+        if (key ~ /[[:space:]]/) state = state " space-in-name"
+        if (substr(line, index(line, "=") + 1) == "") state = state " blank-value"
+        printf "  line %-4d %-28s%s\n", NR, key, (state == "" ? "" : "  <--" state)
+      }' "$file"
+    echo
+    say "App keys in $file:"
+    for k in $keys; do
+      val="$(get_env_val "$k" "$file")"
+      if [ -n "$val" ]; then
+        printf '  %-28s set (length %s)\n' "$k" "${#val}"
+      elif grep -qE "^[[:space:]]*(export[[:space:]]+)?${k}[[:space:]]*=" "$file"; then
+        printf '  %-28s BLANK\n' "$k"
+      fi
+    done
+
+    echo
+    say "Commented-out app keys in $file (Docker skips these — the app never sees them):"
+    any_comment=0
+    for k in $keys; do
+      if commented_out "$k" "$file"; then
+        printf '  %-28s commented out  <-- delete the leading # to enable it\n' "$k"
+        any_comment=1
+      fi
+    done
+    [ "$any_comment" = 1 ] || printf '  none\n'
+
+    # Names that are one character off a real key (MEMBERSHIP_PRICE_KOB0 with a
+    # zero instead of the letter O is the classic one).
+    typos="$(awk -v known="$keys" '
+      BEGIN { n = split(known, K, " ") }
+      {
+        line = $0
+        sub(/\r$/, "", line)
+        sub(/^[[:space:]]+/, "", line)
+        sub(/^#[[:space:]]*/, "", line)
+        sub(/^export[[:space:]]+/, "", line)
+        if (index(line, "=") == 0) next
+        name = substr(line, 1, index(line, "=") - 1)
+        gsub(/[[:space:]]+/, "", name)
+        if (name == "") next
+        for (i = 1; i <= n; i++) if (name == K[i]) next
+        norm = name
+        gsub(/0/, "O", norm)
+        for (i = 1; i <= n; i++) {
+          if (norm == K[i]) printf "  %-28s TYPO - did you mean %s?\n", name, norm
+        }
+      }' "$file")"
+    if [ -n "$typos" ]; then
+      echo
+      say "Key names that look like typos in $file:"
+      printf '%s\n' "$typos"
+    fi
+  done
+
+  echo
+  cenv="$(container_env_names)"
+  CONTAINER_ENV="$cenv"
+  if [ -z "$cenv" ]; then
+    warn "Container: not running (./deploy.sh status)"
+  else
+    say "Keys inside the running container:"
+    printf '  %s\n' "$(printf '%s' "$cenv" | tr '\n' ' ')"
+  fi
+
+  echo
+  say "Verdict:"
+  if [ -z "$cenv" ]; then
+    warn "  start the app first: ./deploy.sh restart"
+    return 0
+  fi
+  for k in $keys; do
+    if ! printf '%s\n' "$cenv" | grep -qx "$k"; then
+      case "$k" in
+        PORT | APP_URL | MEMBERSHIP_PRICE_KOBO) ;; # optional / defaulted
+        *) warn "  ✖ $k is NOT in the container" ;;
+      esac
+    fi
+  done
+  if printf '%s\n' "$cenv" | grep -qx PAYSTACK_SECRET_KEY; then
+    say "  ✔ PAYSTACK_SECRET_KEY is live in the container — checkout is enabled."
+  elif commented_out PAYSTACK_SECRET_KEY; then
+    warn "  ✖ PAYSTACK_SECRET_KEY is in .env but COMMENTED OUT, so Docker skips it and the"
+    warn "    app correctly reports 'not configured'. Delete the leading '#' so the line reads:"
+    warn "      PAYSTACK_SECRET_KEY=sk_live_..."
+    warn "    then: ./deploy.sh restart"
+  else
+    warn "  ✖ PAYSTACK_SECRET_KEY is missing from the container, so the app correctly"
+    warn "    reports 'not configured'. Put 'PAYSTACK_SECRET_KEY=sk_...' on its own"
+    warn "    line in .env (no '#', no quotes, no 'export', no spaces around '='), then:"
+    warn "      ./deploy.sh restart"
+  fi
+}
+
 # ---- clean rebuild helpers (./deploy.sh new) -------------------
 # Throw away everything that could serve stale code:
 #   * the container       (down WITHOUT -v — the data volume survives)
@@ -1023,7 +1207,7 @@ verify_fresh_release() {
   created="$("${DOCKER[@]}" image inspect "$img" --format '{{.Created}}' 2>/dev/null || true)"
   say "Image in use: ${img:0:19}… (built ${created:-unknown})"
 
-  envnames="$("${COMPOSE[@]}" exec -T omnivex printenv 2>/dev/null | cut -d= -f1 | sort || true)"
+  envnames="${CONTAINER_ENV:-$(container_env_names)}"
   if [ -z "$envnames" ]; then
     warn "Could not read the container environment — check ./deploy.sh status"
     return 0
@@ -1155,6 +1339,7 @@ deploy() {
   say "✔ Omnivex Academy is up on port ${port}"
   "${COMPOSE[@]}" ps
 
+  CONTAINER_ENV="$(container_env_names)"
   if [ "${NEW_BUILD:-0}" = "1" ]; then
     verify_fresh_release
   fi
@@ -1230,23 +1415,41 @@ reminders() {
   if [ -z "$app_url" ]; then app_url="http://localhost:${port}"; fi
 
   echo
-  if [ -z "$(get_env_val ADMIN_PASSWORD)" ]; then
-    warn "• ADMIN_PASSWORD is empty in .env — no admin account exists. Add it, then ./deploy.sh restart"
+  if [ -z "$(get_env_val APP_URL)" ]; then
+    warn "• APP_URL is not set — payment callback and auth redirects fall back to the"
+    warn "  request host. Add APP_URL=https://omnivex-academy.xyz to .env for stable links."
   fi
-  if [ -z "$(get_env_val RESEND_API_KEY)" ]; then
-    warn "• RESEND_API_KEY is empty — sign-up OTP and password-reset emails will fail. Add it, then ./deploy.sh restart"
-  elif [ -z "$(get_env_val RESEND_WEBHOOK_SECRET)" ]; then
-    warn "• RESEND_WEBHOOK_SECRET is empty — delivery webhooks are rejected. Add it, then ./deploy.sh restart"
+  if ! env_live ADMIN_PASSWORD; then
+    warn "• ADMIN_PASSWORD is not in the container — no admin account exists."
+    warn "  Add ADMIN_PASSWORD=... on its own line in .env, then ./deploy.sh restart"
+  fi
+  if ! env_live RESEND_API_KEY; then
+    warn "• RESEND_API_KEY is not in the container — sign-up OTP and password-reset emails will fail."
+    warn "  Add RESEND_API_KEY=... on its own line in .env, then ./deploy.sh restart"
+  elif ! env_live RESEND_WEBHOOK_SECRET; then
+    warn "• RESEND_WEBHOOK_SECRET is not in the container — delivery webhooks are rejected."
+    if commented_out RESEND_WEBHOOK_SECRET; then
+      warn "  Your .env line is commented out (#) and has no value — uncomment it and add the signing secret."
+    else
+      warn "  Add RESEND_WEBHOOK_SECRET=... on its own line in .env, then ./deploy.sh restart"
+    fi
   else
     say "• Resend webhook to register: ${app_url}/api/webhooks/resend"
   fi
-  if [ -z "$(get_env_val PAYSTACK_SECRET_KEY)" ]; then
-    warn "• PAYSTACK_SECRET_KEY is empty — checkout is disabled. Add it, then ./deploy.sh restart"
+  if ! env_live PAYSTACK_SECRET_KEY; then
+    warn "• PAYSTACK_SECRET_KEY is not in the container — checkout is disabled."
+    if commented_out PAYSTACK_SECRET_KEY; then
+      warn "  Cause: the line in .env is COMMENTED OUT (starts with #), so Docker skips it."
+      warn "  Delete the leading '#' so it reads:  PAYSTACK_SECRET_KEY=sk_live_..."
+    else
+      warn "  It must be exactly 'PAYSTACK_SECRET_KEY=sk_...' (no 'export', no spaces around '=')."
+    fi
+    warn "  Then: ./deploy.sh restart   —   diagnose with: ./deploy.sh envcheck"
   else
     say "• Paystack webhook to register: ${app_url}/api/payments/webhook"
   fi
   echo
-  say "Helpers: ./deploy.sh logs [-f] | restart | stop | status | backup | proxy | tls | doctor"
+  say "Helpers: ./deploy.sh logs [-f] | restart | stop | status | backup | proxy | tls | doctor | envcheck"
 }
 
 # ---- Cloudflare (automated when CLOUDFLARE_API_TOKEN is set) ----
@@ -1592,7 +1795,13 @@ case "$CMD" in
     require_env
     say "Recreating the container (applies .env changes)…"
     "${COMPOSE[@]}" up -d --force-recreate
+    CONTAINER_ENV="$(container_env_names)"
     say "✔ restarted — health: ./deploy.sh status"
+    if env_live PAYSTACK_SECRET_KEY; then
+      say "✔ PAYSTACK_SECRET_KEY is live in the container — checkout is enabled."
+    else
+      warn "✖ PAYSTACK_SECRET_KEY is still missing from the container — ./deploy.sh envcheck"
+    fi
     ;;
   stop)
     require_env
@@ -1600,6 +1809,7 @@ case "$CMD" in
     say "✔ stopped"
     ;;
   status) do_status ;;
+  envcheck) do_envcheck ;;
   backup) do_backup ;;
   proxy)
     require_env

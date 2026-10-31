@@ -26,7 +26,12 @@ import {
 import { env } from "../env";
 import { requireAdmin, type SessionUser } from "../middleware";
 import { notify, broadcastToUsers, activeMemberIds } from "../notifications";
-import { revokeMembership, paystackConfigured, verifyPayment } from "../payments";
+import {
+  revokeMembership,
+  paystackConfigured,
+  verifyPayment,
+  publicBaseUrl,
+} from "../payments";
 import { sendBroadcast, emailConfigured, fromAddress } from "../email";
 import { broadcastEmail, stripHtml } from "../emailTemplates";
 import { getIO } from "../realtime";
@@ -671,7 +676,8 @@ router.post("/payments/:reference/reverify", async (req: Request, res: Response)
 /* Settings: price + terms + senders                                   */
 /* ------------------------------------------------------------------ */
 
-router.get("/settings", (_req: Request, res: Response) => {
+router.get("/settings", (req: Request, res: Response) => {
+  const base = publicBaseUrl(req);
   res.json({
     priceKobo: getMembershipPriceKobo(),
     terms: getTerms(),
@@ -681,10 +687,13 @@ router.get("/settings", (_req: Request, res: Response) => {
     resendConfigured: emailConfigured(),
     resendWebhookConfigured: Boolean(env.resendWebhookSecret),
     paystackConfigured: paystackConfigured(),
-    /* Absolute URLs to paste into the Resend & Paystack dashboards. */
+    /* Absolute URLs to paste into the Resend & Paystack dashboards. Derived
+       from the incoming request when APP_URL is unset, so they are never
+       localhost in production. */
     webhooks: {
-      resend: `${env.appUrl}/api/webhooks/resend`,
-      paystack: `${env.appUrl}/api/payments/webhook`,
+      resend: `${base}/api/webhooks/resend`,
+      paystack: `${base}/api/payments/webhook`,
+      paystackCallback: `${base}/pay/callback`,
     },
   });
 });

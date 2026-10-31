@@ -1,6 +1,11 @@
 import path from "node:path";
 import fs from "node:fs";
-import express, { type Express, type Request, type Response } from "express";
+import express, {
+  type Express,
+  type NextFunction,
+  type Request,
+  type Response,
+} from "express";
 import helmet from "helmet";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
@@ -57,7 +62,13 @@ export function createApp(): Express {
           "http://localhost:5173",
           "http://127.0.0.1:5173",
         ];
-        cb(null, allowed.some((a) => origin === a || origin.endsWith(new URL(a || "http://x").host)));
+        // Exact origin match only: a suffix test would accept look-alikes such
+        // as https://evil-omnivex-academy.xyz with credentials attached.
+        const normalized = origin.replace(/\/+$/, "");
+        cb(
+          null,
+          allowed.some((a) => Boolean(a) && a.replace(/\/+$/, "") === normalized),
+        );
       },
       credentials: true,
     }),
@@ -190,6 +201,20 @@ export function createApp(): Express {
         );
     });
   }
+
+  /* Final error handler: JSON only, never a stack trace. */
+  app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
+    if (res.headersSent) return next(err);
+    const e = err as { status?: number; statusCode?: number; message?: string };
+    const status = Number(e?.status || e?.statusCode) || 500;
+    if (status >= 500) console.error("[server] unhandled route error:", err);
+    res.status(status).json({
+      error:
+        status >= 500
+          ? "Something went wrong on our side. Please try again."
+          : e?.message || "Request failed",
+    });
+  });
 
   return app;
 }

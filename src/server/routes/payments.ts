@@ -8,6 +8,7 @@ import {
   verifyPayment,
   verifyPaystackSignature,
   paystackConfigured,
+  publicBaseUrl,
 } from "../payments";
 import { getIO } from "../realtime";
 
@@ -56,7 +57,7 @@ router.post(
         code: "TERMS_REQUIRED",
       });
     }
-    const result = await initializePayment(u.id);
+    const result = await initializePayment(u.id, publicBaseUrl(req));
     if (!result.ok) {
       return res
         .status(result.code === "PAYSTACK_NOT_CONFIGURED" ? 503 : 400)
@@ -109,8 +110,26 @@ router.post(
  */
 export function paymentWebhookRaw(req: Request, res: Response): void {
   const chunks: Buffer[] = [];
-  req.on("data", (c: Buffer) => chunks.push(c));
+  // This route is mounted before the rate limiter and body parser, so it owns
+  // its own ceiling: Paystack bodies are a few KB, anything larger is abuse.
+  const MAX_BODY = 1_000_000;
+  let size = 0;
+  let tooLarge = false;
+  req.on("data", (c: Buffer) => {
+    if (tooLarge) return;
+    size += c.length;
+    if (size > MAX_BODY) {
+      tooLarge = true;
+      chunks.length = 0;
+      return;
+    }
+    chunks.push(c);
+  });
   req.on("end", async () => {
+    if (tooLarge) {
+      res.status(413).json({ error: "Payload too large" });
+      return;
+    }
     const raw = Buffer.concat(chunks);
     const signature = req.header("x-paystack-signature");
     if (!verifyPaystackSignature(raw, signature)) {
@@ -132,7 +151,24 @@ export function paymentWebhookRaw(req: Request, res: Response): void {
         event.event === "charge.failed" ||
         event.event === "charge.pending"
       ) {
-        await verifyPayment(reference, "webhook");
+        // A failed/transient verification must NOT be acknowledged with 200:
+        // Paystack only retries non-2xx deliveries, and a retry is exactly what
+        // grants access when the member has already closed the tab.
+        let outcome: Awaited<ReturnType<typeof verifyPayment>>;
+        try {
+          outcome = await verifyPayment(reference, "webhook");
+        } catch (err) {
+          console.error(`[webhook] verify threw for ${reference}:`, err);
+          res.status(500).json({ error: "Verification error", retry: true });
+          return;
+        }
+        if (!outcome.ok && outcome.error !== "Unknown payment reference") {
+          console.error(
+            `[webhook] verify failed for ${reference}: ${outcome.error} — asking Paystack to retry`,
+          );
+          res.status(500).json({ error: "Verification failed", retry: true });
+          return;
+        }
       }
       const io = getIO();
       if (io) {

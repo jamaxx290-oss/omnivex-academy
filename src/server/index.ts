@@ -5,6 +5,7 @@ import { bootstrapSettings, bootstrapAdmin } from "./bootstrap";
 import { initRealtime } from "./realtime";
 import { ensureVapidKeys } from "./notifications";
 import { closeStaleCalls } from "./calls";
+import { appUrlIsLocal, reconcilePendingPayments } from "./payments";
 
 async function main(): Promise<void> {
   bootstrapSettings();
@@ -33,7 +34,23 @@ async function main(): Promise<void> {
     } else if (!env.paystackPublicKey) {
       console.log("[server] PAYSTACK_PUBLIC_KEY missing — checkout will be unavailable");
     }
+    if (appUrlIsLocal()) {
+      console.log(
+        "[server] APP_URL is not a public URL — payment callback/webhook URLs are " +
+          "derived from the request host. Set APP_URL=https://omnivex-academy.xyz in .env.",
+      );
+    }
   });
+
+  // Safety net: someone who closes the browser right after paying still gets
+  // access, even if the webhook is delayed or was never configured.
+  const sweep = () => {
+    void reconcilePendingPayments().catch((err) =>
+      console.error("[payments] reconcile error:", err),
+    );
+  };
+  setTimeout(sweep, 10_000).unref();
+  setInterval(sweep, 120_000).unref();
 
   const shutdown = () => {
     console.log("[server] shutting down");

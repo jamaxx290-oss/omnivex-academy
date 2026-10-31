@@ -176,8 +176,12 @@ function Dashboard() {
 
       {!data.paystackConfigured && (
         <p className="rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-warning">
-          Paystack keys are not configured — online checkout is disabled. Set
-          PAYSTACK_SECRET_KEY (and the public key) in the environment, then restart.
+          Paystack keys are not configured — online checkout is disabled. The
+          server process has no PAYSTACK_SECRET_KEY. Put it on its own line in
+          <code>.env</code> as <code>PAYSTACK_SECRET_KEY=sk_…</code> (no quotes,
+          no <code>export</code>, no spaces around <code>=</code>), then run
+          <code>./deploy.sh restart</code> — <code>./deploy.sh envcheck</code> says
+          what the container actually received.
         </p>
       )}
 
@@ -1538,7 +1542,11 @@ type AdminSettingsInfo = {
   resendConfigured: boolean;
   resendWebhookConfigured: boolean;
   paystackConfigured: boolean;
-  webhooks: { resend: string; paystack: string };
+  webhooks: {
+    resend: string;
+    paystack: string;
+    paystackCallback: string;
+  };
 };
 
 type BroadcastRow = {
@@ -1732,6 +1740,11 @@ function EmailAdmin() {
             label="Paystack webhook URL"
             hint="Paystack dashboard → Settings → API Keys & Webhooks → Webhook URL"
             url={settings?.webhooks.paystack || ""}
+          />
+          <WebhookCard
+            label="Paystack callback URL"
+            hint="Same Paystack page → Callback URL. We also send this with every transaction, so it only matters if a payment starts outside the app"
+            url={settings?.webhooks.paystackCallback || ""}
           />
         </div>
       </div>

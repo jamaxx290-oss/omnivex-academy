@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
-import { eq } from "drizzle-orm";
+import type { Request } from "express";
+import { and, eq, gt, lt, ne } from "drizzle-orm";
 import { db, getMembershipPriceKobo, getTerms } from "./db";
 import { payments, user } from "./db/schema";
 import { env } from "./env";
@@ -11,6 +12,32 @@ function uuid(): string {
 
 export function paystackConfigured(): boolean {
   return Boolean(env.paystackSecretKey);
+}
+
+/** True when APP_URL is unset or still points at the developer's machine. */
+export function appUrlIsLocal(): boolean {
+  return /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\/?$/i.test(env.appUrl);
+}
+
+function firstHeader(req: Request, name: string): string {
+  return String(req.header(name) || "")
+    .split(",")[0]
+    .trim();
+}
+
+/**
+ * Public origin for URLs that leave the server: the Paystack callback_url and
+ * the webhook URLs shown in the admin panel. APP_URL wins when it is a real
+ * public URL; otherwise it is derived from the request (x-forwarded-proto/host
+ * from nginx, Caddy or the Cloudflare Worker in front of us), so a missing
+ * APP_URL can never send a paying member to http://localhost.
+ */
+export function publicBaseUrl(req: Request): string {
+  if (!appUrlIsLocal()) return env.appUrl;
+  const proto = firstHeader(req, "x-forwarded-proto") || req.protocol || "http";
+  const host = firstHeader(req, "x-forwarded-host") || firstHeader(req, "host");
+  if (!host) return env.appUrl;
+  return `${proto}://${host}`.replace(/\/+$/, "");
 }
 
 const API = "https://api.paystack.co";
@@ -53,7 +80,11 @@ export function generateReference(): string {
  * Creates a pending payment record and initializes a Paystack transaction.
  * Returns authorization_url for the client to redirect to.
  */
-export async function initializePayment(userId: string): Promise<
+export async function initializePayment(
+  userId: string,
+  /** Public origin to return the payer to; defaults to APP_URL. */
+  baseUrl?: string,
+): Promise<
   | { ok: true; reference: string; authorizationUrl: string; amountKobo: number }
   | { ok: false; error: string; code?: string }
 > {
@@ -89,7 +120,8 @@ export async function initializePayment(userId: string): Promise<
     created_at: new Date(),
   });
 
-  const callbackUrl = `${env.appUrl}/pay/callback?reference=${encodeURIComponent(reference)}`;
+  const origin = (baseUrl || env.appUrl).replace(/\/+$/, "");
+  const callbackUrl = `${origin}/pay/callback?reference=${encodeURIComponent(reference)}`;
   const { ok, body } = await paystackFetch("/transaction/initialize", {
     method: "POST",
     body: JSON.stringify({
@@ -133,7 +165,7 @@ export type VerifyOutcome =
  */
 export async function verifyPayment(
   reference: string,
-  source: "callback" | "webhook" | "admin",
+  source: "callback" | "webhook" | "admin" | "reconcile",
 ): Promise<VerifyOutcome> {
   const record = await db.query.payments.findFirst({
     where: eq(payments.reference, reference),
@@ -215,7 +247,9 @@ export async function grantMembership(
       verified_at: now,
       paystack_response: JSON.stringify(responseBody).slice(0, 20000),
     })
-    .where(eq(payments.id, paymentId))
+    // Only the call that flips pending → success wins, so a webhook racing the
+    // browser callback cannot grant (or notify) twice.
+    .where(and(eq(payments.id, paymentId), ne(payments.status, "success")))
     .returning({ id: payments.id, user_id: payments.user_id });
 
   if (!updated.length) return; // another process already granted
@@ -236,6 +270,49 @@ export async function grantMembership(
   const io = (await import("./realtime")).getIO();
   io?.to(`user:${userId}`).emit("membership:changed", { status: "active" });
   console.log(`[payments] membership granted to ${userId} via ${source}`);
+}
+
+/**
+ * Safety net for members who close the browser right after paying.
+ *
+ * The normal path is the Paystack webhook, but it can be delayed, disabled in
+ * the dashboard, or fail its signature check. This sweep re-verifies recent
+ * payments that are still pending directly against Paystack and grants access
+ * exactly like the webhook would — no browser, session or callback needed.
+ * Runs at startup and every couple of minutes (see index.ts).
+ */
+export async function reconcilePendingPayments(limit = 20): Promise<number> {
+  if (!paystackConfigured()) return 0;
+  const now = Date.now();
+  const rows = await db
+    .select({ reference: payments.reference })
+    .from(payments)
+    .where(
+      and(
+        eq(payments.status, "pending"),
+        // Give the webhook/callback a head start before stepping in.
+        lt(payments.created_at, new Date(now - 60_000)),
+        // Don't pay API calls for ancient, abandoned checkouts forever.
+        gt(payments.created_at, new Date(now - 24 * 60 * 60 * 1000)),
+      ),
+    )
+    .limit(limit);
+
+  let granted = 0;
+  for (const row of rows) {
+    try {
+      const outcome = await verifyPayment(row.reference, "reconcile");
+      if (outcome.ok && outcome.status === "success") granted += 1;
+    } catch (err) {
+      console.error(`[payments] reconcile failed for ${row.reference}:`, err);
+    }
+  }
+  if (granted > 0) {
+    console.log(
+      `[payments] reconciled ${granted} payment(s) without a browser callback`,
+    );
+  }
+  return granted;
 }
 
 export async function revokeMembership(userId: string): Promise<void> {

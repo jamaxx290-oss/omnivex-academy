@@ -32,6 +32,20 @@ function resolveAuthSecret(): string {
 
 const PORT = Number(process.env.PORT) || 3000;
 
+/**
+ * Normalizes a value copied out of .env by hand: trims whitespace, drops a
+ * stray `export ` prefix and a pair of wrapping quotes. Without this, a line
+ * like `PAYSTACK_SECRET_KEY="sk_live_…"` arrives with its quotes intact and
+ * Paystack rejects the Authorization header — or a whitespace-only value looks
+ * like a configured key (deploy.sh envcheck reports the shape).
+ */
+function clean(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const stripped = value.trim().replace(/^export\s+/, "");
+  const unquoted = stripped.replace(/^(['"])([\s\S]*)\1$/, "$2").trim();
+  return unquoted === "" ? undefined : unquoted;
+}
+
 export const env = {
   nodeEnv: process.env.NODE_ENV || "development",
   isProd,
@@ -55,8 +69,8 @@ export const env = {
     process.env.RESEND_FROM_EMAIL || "hello@omnivex-academy.xyz",
   resendWebhookSecret: process.env.RESEND_WEBHOOK_SECRET || "",
 
-  paystackSecretKey: process.env.PAYSTACK_SECRET_KEY || undefined,
-  paystackPublicKey: process.env.PAYSTACK_PUBLIC_KEY || undefined,
+  paystackSecretKey: clean(process.env.PAYSTACK_SECRET_KEY),
+  paystackPublicKey: clean(process.env.PAYSTACK_PUBLIC_KEY),
 
   adminEmail: process.env.ADMIN_EMAIL || "",
   adminPassword: process.env.ADMIN_PASSWORD || "",
