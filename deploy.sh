@@ -1417,7 +1417,18 @@ reminders() {
   echo
   if [ -z "$(get_env_val APP_URL)" ]; then
     warn "• APP_URL is not set — payment callback and auth redirects fall back to the"
-    warn "  request host. Add APP_URL=https://omnivex-academy.xyz to .env for stable links."
+    warn "  request host. Add APP_URL=https://${WORKER_HOST} to .env for stable links."
+  elif [ -n "$(get_env_val APP_URL)" ]; then
+    # Catch drift between what is configured and where the Worker actually
+    # serves the app — the cause of wrong Paystack webhook/callback links.
+    local app_host
+    app_host="$(get_env_val APP_URL)"
+    app_host="${app_host#*://}"
+    app_host="${app_host%%/*}"
+    if [ "$app_host" != "$WORKER_HOST" ]; then
+      warn "• APP_URL host is '${app_host}' but the app is served at '${WORKER_HOST}'."
+      warn "  Set APP_URL=https://${WORKER_HOST} in .env so payment and auth links match."
+    fi
   fi
   if ! env_live ADMIN_PASSWORD; then
     warn "• ADMIN_PASSWORD is not in the container — no admin account exists."

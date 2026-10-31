@@ -37,7 +37,8 @@ async function main(): Promise<void> {
     if (appUrlIsLocal()) {
       console.log(
         "[server] APP_URL is not a public URL — payment callback/webhook URLs are " +
-          "derived from the request host. Set APP_URL=https://omnivex-academy.xyz in .env.",
+          "derived from the request host. Set APP_URL=https://app.omnivex-academy.xyz " +
+          "in .env (the public host the Cloudflare Worker proxies to this container).",
       );
     }
   });

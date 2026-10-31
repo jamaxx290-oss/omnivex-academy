@@ -59,6 +59,11 @@ export function createApp(): Express {
         const allowed = [
           env.appUrl,
           env.betterAuthUrl,
+          // The two hostnames the app is actually served from (the Cloudflare
+          // Worker proxies both to this container). Listed explicitly so CORS
+          // keeps exact-match strictness instead of suffix matching.
+          "https://app.omnivex-academy.xyz",
+          "https://omnivex-academy.xyz",
           "http://localhost:5173",
           "http://127.0.0.1:5173",
         ];
