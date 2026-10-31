@@ -29,6 +29,10 @@
 #   ./deploy.sh         (this script does ALL of the above)
 #
 # Helpers:
+#   ./deploy.sh new       no-cache rebuild: drop the app image, the Docker
+#                         build cache, dist/ and the Vite/TS caches, pull the
+#                         base images, then rebuild and restart from scratch.
+#                         The database volume and .env are never touched.
 #   ./deploy.sh logs      show the last 200 app log lines (-f to follow)
 #   ./deploy.sh restart   recreate the container (applies .env changes)
 #   ./deploy.sh stop      stop the container
@@ -47,6 +51,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 CMD="${1:-}"
+# Set by `./deploy.sh new`: makes the build step ignore every cache.
+NEW_BUILD=0
 
 # Single source of truth for the Worker's hostname. The proxy relayer passes
 # every forwarded request to the origin with Host = this value, because the
@@ -84,6 +90,11 @@ Commands:
             .env, no dashboard clicks; re-running only re-applies the same state
   tls EMAIL get a Let's Encrypt certificate on 443 (Cloudflare Full strict)
   doctor    one-shot crash report — run this when the app is down
+  new       force a from-scratch rebuild: removes the app image, the Docker
+            build cache, dist/ and the Vite/TS caches, pulls the base images,
+            rebuilds with --no-cache and recreates the container so the new
+            code and every .env value are live. The database volume and .env
+            are preserved.
   help      show this help
 EOF
 }
@@ -94,7 +105,7 @@ case "${CMD}" in
     usage
     exit 0
     ;;
-  logs | restart | stop | status | backup | proxy | tls | worker | doctor) ;;
+  logs | restart | stop | status | backup | proxy | tls | worker | doctor | new) ;;
   *)
     usage >&2
     exit 1
@@ -978,6 +989,61 @@ do_backup() {
   say "✔ backups/omnivex-${ts}.db  +  backups/uploads-${ts}.tgz"
 }
 
+# ---- clean rebuild helpers (./deploy.sh new) -------------------
+# Throw away everything that could serve stale code:
+#   * the container       (down WITHOUT -v — the data volume survives)
+#   * the app image + the shared BuildKit cache
+#   * dist/ and the local Vite / TypeScript caches
+# .env is only read here, never written, and data/ + backups/ are left alone.
+clean_build_state() {
+  say "Stopping the container (the database volume is not removed)…"
+  # No -v / --volumes: omnivex-data holds the SQLite DB and uploads.
+  "${COMPOSE[@]}" down --remove-orphans || true
+
+  say "Removing the app image…"
+  "${DOCKER[@]}" rmi -f omnivex-academy:latest >/dev/null 2>&1 || true
+
+  say "Clearing the Docker build cache…"
+  # Cache only — other apps' images and volumes on this VPS are untouched.
+  "${DOCKER[@]}" builder prune -af >/dev/null 2>&1 || true
+
+  say "Removing local build output and caches…"
+  rm -rf dist node_modules/.vite node_modules/.cache .vite
+  find . -maxdepth 2 -name '*.tsbuildinfo' -not -path './node_modules/*' -delete 2>/dev/null || true
+
+  say "✔ clean slate: no app image, no build cache, no dist"
+}
+
+# Prove the restarted container is running the freshly built image and that
+# every key from .env made it into the process environment. Key NAMES only —
+# values are never printed.
+verify_fresh_release() {
+  local img created envnames env_keys k missing=0
+  img="$("${DOCKER[@]}" inspect omnivex --format '{{.Image}}' 2>/dev/null || true)"
+  created="$("${DOCKER[@]}" image inspect "$img" --format '{{.Created}}' 2>/dev/null || true)"
+  say "Image in use: ${img:0:19}… (built ${created:-unknown})"
+
+  envnames="$("${COMPOSE[@]}" exec -T omnivex printenv 2>/dev/null | cut -d= -f1 | sort || true)"
+  if [ -z "$envnames" ]; then
+    warn "Could not read the container environment — check ./deploy.sh status"
+    return 0
+  fi
+  say "Environment keys injected: $(printf '%s\n' "$envnames" | wc -l | tr -d ' ')"
+
+  env_keys="$(awk -F= '/^[A-Za-z_][A-Za-z0-9_]*=/{print $1}' .env | sort)"
+  for k in $env_keys; do
+    if ! printf '%s\n' "$envnames" | grep -qx "$k"; then
+      warn "  missing in container: $k"
+      missing=$((missing + 1))
+    fi
+  done
+  if [ "$missing" = "0" ]; then
+    say "✔ every key from .env is live in the container"
+  else
+    warn "${missing} key(s) from .env are not in the container — check env_file in docker-compose.yml"
+  fi
+}
+
 # ---- 1. Environment secrets ------------------------------------
 deploy() {
   ensure_curl
@@ -1049,11 +1115,22 @@ deploy() {
   if [ "$(id -u)" = "0" ]; then chown -R 1000:1000 data || true; fi
 
   # ---- 4. Build + start the container --------------------------
-  say "Building the image (bounded memory)…"
-  "${COMPOSE[@]}" build --build-arg NODE_OPTIONS=--max-old-space-size=512
+  if [ "${NEW_BUILD:-0}" = "1" ]; then
+    clean_build_state
+    say "Building the image from scratch (--no-cache --pull, bounded memory)…"
+    "${COMPOSE[@]}" build --no-cache --pull \
+      --build-arg NODE_OPTIONS=--max-old-space-size=512
 
-  say "Starting the container…"
-  "${COMPOSE[@]}" up -d
+    say "Starting the container from the fresh image…"
+    # --force-recreate re-applies env_file so .env edits are picked up too.
+    "${COMPOSE[@]}" up -d --force-recreate --remove-orphans
+  else
+    say "Building the image (bounded memory)…"
+    "${COMPOSE[@]}" build --build-arg NODE_OPTIONS=--max-old-space-size=512
+
+    say "Starting the container…"
+    "${COMPOSE[@]}" up -d
+  fi
 
   # ---- 5. Health check -----------------------------------------
   say "Waiting for the app to become healthy…"
@@ -1077,6 +1154,10 @@ deploy() {
 
   say "✔ Omnivex Academy is up on port ${port}"
   "${COMPOSE[@]}" ps
+
+  if [ "${NEW_BUILD:-0}" = "1" ]; then
+    verify_fresh_release
+  fi
 
   # ---- 6. Cloudflare: DNS + a SAFE SSL mode (before any proxy work) ----
   # Never "flexible": the mode is zone-wide and other hostnames on this zone
@@ -1492,6 +1573,14 @@ ensure_compose
 
 case "$CMD" in
   "") deploy ;;
+  new)
+    # Full clean rebuild: no image, no build cache, no dist, then deploy.
+    require_env
+    say "Clean rebuild — pulling base images and discarding every build cache."
+    say "(Run 'git pull' first if you want the newest upstream code.)"
+    NEW_BUILD=1
+    deploy
+    ;;
   logs)
     require_env
     if [ "${2:-}" = "-f" ] || [ "${2:-}" = "--follow" ]; then
